@@ -1,0 +1,286 @@
+---
+title: "附录 F：自定义模型配置"
+chapter: 95
+description: "models.json 配置指南和兼容性矩阵"
+---
+
+# 自定义模型配置
+
+Pi 通过 `models.json` 文件管理所有可用的 LLM 提供商（Provider）和模型（Model）。你可以通过编辑此文件接入本地部署的模型、自托管的推理服务、或企业私有 API 端点。
+
+---
+
+## 文件位置
+
+| 级别 | 路径 | 说明 |
+|------|------|------|
+| 全局 | `~/.pi/agent/models.json` | 所有项目共享 |
+| 项目 | `.pi/models.json`（项目根目录） | 仅当前项目生效，会与全局配置合并 |
+
+> 项目级配置中的同名 provider 或 model 会覆盖全局配置中的对应项。
+
+---
+
+## Provider 配置
+
+每个 Provider 描述了一个 LLM API 服务端。在 `models.json` 的 `providers` 数组中定义。
+
+```json
+{
+  "providers": [
+    {
+      "id": "my-ollama",
+      "name": "Local Ollama",
+      "api": "openai",
+      "baseUrl": "http://localhost:11434/v1",
+      "apiKey": "ollama",
+      "headers": {},
+      "authHeader": "Authorization"
+    }
+  ]
+}
+```
+
+### 字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | Provider 唯一标识，用于 `getModel(providerId, modelId)` |
+| `name` | string | 是 | 显示名称 |
+| `api` | string | 是 | API 协议类型：`"anthropic"` 或 `"openai"` |
+| `baseUrl` | string | 是 | API 基地址（不含 `/chat/completions` 等路径后缀） |
+| `apiKey` | string | 否 | API 密钥，支持三种格式（见下文） |
+| `headers` | object | 否 | 附加 HTTP 请求头，键值对形式 |
+| `authHeader` | string | 否 | 认证头名称，默认 `"Authorization"`。部分服务使用 `"x-api-key"` |
+
+### apiKey 解析规则
+
+`apiKey` 字段支持三种格式，按优先级顺序解析：
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| `env:VAR_NAME` | `"env:MY_API_KEY"` | 从环境变量读取。推荐方式，避免密钥明文写入配置文件 |
+| `!command` | `"!op read op://vault/key"` | 执行 shell 命令获取密钥（如 1Password CLI） |
+| 字面量 | `"sk-abc123..."` | 直接写入密钥字符串。仅建议本地开发使用 |
+
+> **安全提示**：生产环境建议使用 `env:` 或 `!command` 方式，避免将密钥硬编码到配置文件中。
+
+---
+
+## Model 定义
+
+在 `models.json` 的 `models` 数组中定义可用模型。每个模型必须关联到一个已定义的 Provider。
+
+```json
+{
+  "models": [
+    {
+      "id": "qwen2.5-coder:32b",
+      "name": "Qwen 2.5 Coder 32B",
+      "provider": "my-ollama",
+      "api": "openai",
+      "baseUrl": "http://localhost:11434/v1",
+      "reasoning": false,
+      "input": 0,
+      "output": 0,
+      "cost": { "input": 0, "output": 0, "cacheRead": 0 },
+      "contextWindow": 32768,
+      "maxTokens": 8192
+    }
+  ]
+}
+```
+
+### 字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 模型 ID，需与 API 端点接受的 model 名一致 |
+| `name` | string | 是 | 人类可读的显示名称 |
+| `provider` | string | 是 | 关联的 Provider ID |
+| `api` | string | 是 | API 协议类型，通常继承自 Provider |
+| `baseUrl` | string | 否 | 可选覆盖 Provider 的 baseUrl（某些模型有独立端点） |
+| `reasoning` | boolean | 否 | 是否为推理模型（如 o1、DeepSeek-R1），默认 `false` |
+| `input` | number | 否 | 最大输入 token 数。`0` 表示不限或使用 contextWindow |
+| `output` | number | 否 | 最大输出 token 数。`0` 表示使用 maxTokens |
+| `cost` | object | 否 | 计费信息：`input`（每百万输入 token 美元）、`output`（每百万输出 token 美元）、`cacheRead`（缓存读取费率） |
+| `contextWindow` | number | 是 | 上下文窗口大小（token 数），用于 compaction 判断 |
+| `maxTokens` | number | 是 | 单次回复最大 token 数 |
+
+---
+
+## 兼容性矩阵
+
+不同模型提供商的 API 在细节上存在差异。Pi 通过兼容性配置（`compat`）来适配这些差异。在 model 定义中添加 `compat` 对象：
+
+```json
+{
+  "id": "deepseek-r1",
+  "name": "DeepSeek R1",
+  "provider": "deepseek",
+  "compat": {
+    "supportsStore": false,
+    "reasoningEffortMap": { "low": "low", "medium": "medium", "high": "high" },
+    "thinkingFormat": "parsed",
+    "requiresAssistantAfterToolResult": true,
+    "supportsStrictMode": false
+  }
+}
+```
+
+### compat 字段详解
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `supportsStore` | boolean | `true` | 是否支持 OpenAI 的 `store` 参数。不支持时 Pi 会从请求中移除该字段，避免 API 报错 |
+| `reasoningEffortMap` | object | `null` | 将 Pi 的 ThinkingLevel（`low`/`medium`/`high`）映射到该模型实际接受的推理强度值。设为 `null` 表示模型不支持推理控制 |
+| `thinkingFormat` | string | `"none"` | 推理内容的返回格式：`"none"`（不返回思考过程）、`"parsed"`（结构化返回，如 Anthropic）、`"raw"`（原始文本混在回复中） |
+| `requiresAssistantAfterToolResult` | boolean | `false` | 是否要求每条 `ToolResultMessage` 后紧跟一条 `AssistantMessage`。部分 OpenAI 兼容 API 有此要求 |
+| `supportsStrictMode` | boolean | `true` | 是否支持工具参数 schema 的 `strict` 模式（强制 LLM 输出严格符合 schema 的 JSON）。不支持时 Pi 会退回到非严格模式 |
+
+### 常见 Provider 兼容性参考
+
+| Provider | supportsStore | reasoningEffortMap | thinkingFormat | requiresAssistant... | supportsStrictMode |
+|----------|:---:|:---:|:---:|:---:|:---:|
+| Anthropic | - | 内置支持 | `parsed` | 否 | - |
+| OpenAI | 是 | 内置支持 | `parsed` | 否 | 是 |
+| Ollama | 否 | `null` | `none` | 否 | 否 |
+| vLLM | 否 | `null` | `none` | 是 | 否 |
+| Azure OpenAI | 否 | 内置支持 | `parsed` | 否 | 是 |
+| DeepSeek | 否 | 自定义 map | `raw` | 是 | 否 |
+
+> 表中 `-` 表示使用该 API 协议的默认行为，无需特别配置。
+
+---
+
+## 配置示例
+
+### 示例 1：Ollama 本地模型
+
+使用 Ollama 运行本地模型，零成本、完全离线。
+
+```json
+{
+  "providers": [
+    {
+      "id": "ollama",
+      "name": "Ollama Local",
+      "api": "openai",
+      "baseUrl": "http://localhost:11434/v1",
+      "apiKey": "ollama"
+    }
+  ],
+  "models": [
+    {
+      "id": "qwen2.5-coder:32b",
+      "name": "Qwen 2.5 Coder 32B (Local)",
+      "provider": "ollama",
+      "api": "openai",
+      "reasoning": false,
+      "cost": { "input": 0, "output": 0, "cacheRead": 0 },
+      "contextWindow": 32768,
+      "maxTokens": 8192,
+      "compat": {
+        "supportsStore": false,
+        "supportsStrictMode": false
+      }
+    }
+  ]
+}
+```
+
+> **提示**：确保 Ollama 已启动（`ollama serve`）并已拉取目标模型（`ollama pull qwen2.5-coder:32b`）。
+
+### 示例 2：vLLM 自托管推理服务
+
+使用 vLLM 部署自定义模型，适用于团队内部共享 GPU 资源。
+
+```json
+{
+  "providers": [
+    {
+      "id": "vllm-internal",
+      "name": "Team vLLM Server",
+      "api": "openai",
+      "baseUrl": "http://gpu-server.internal:8000/v1",
+      "apiKey": "env:VLLM_API_KEY"
+    }
+  ],
+  "models": [
+    {
+      "id": "codellama-70b",
+      "name": "CodeLlama 70B (vLLM)",
+      "provider": "vllm-internal",
+      "api": "openai",
+      "reasoning": false,
+      "cost": { "input": 0, "output": 0, "cacheRead": 0 },
+      "contextWindow": 16384,
+      "maxTokens": 4096,
+      "compat": {
+        "supportsStore": false,
+        "supportsStrictMode": false,
+        "requiresAssistantAfterToolResult": true
+      }
+    }
+  ]
+}
+```
+
+### 示例 3：Azure OpenAI
+
+通过 Azure 企业端点访问 OpenAI 模型，常见于有合规要求的企业环境。
+
+```json
+{
+  "providers": [
+    {
+      "id": "azure-openai",
+      "name": "Azure OpenAI (East US)",
+      "api": "openai",
+      "baseUrl": "https://my-resource.openai.azure.com/openai/deployments/gpt-4o",
+      "apiKey": "env:AZURE_OPENAI_KEY",
+      "headers": {
+        "api-version": "2024-12-01-preview"
+      }
+    }
+  ],
+  "models": [
+    {
+      "id": "gpt-4o",
+      "name": "GPT-4o (Azure)",
+      "provider": "azure-openai",
+      "api": "openai",
+      "reasoning": false,
+      "cost": { "input": 2.5, "output": 10, "cacheRead": 1.25 },
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "compat": {
+        "supportsStore": false,
+        "supportsStrictMode": true
+      }
+    }
+  ]
+}
+```
+
+> **注意**：Azure OpenAI 的 `baseUrl` 需要包含 deployment 名称。`api-version` 通过 `headers` 传递。
+
+---
+
+## 验证配置
+
+配置完成后，可以在代码中快速验证模型是否注册成功：
+
+```typescript
+import { getModel, getProviders } from "pi-ai";
+
+// 列出所有已注册 provider
+const providers = getProviders();
+console.log("Providers:", providers.map(p => p.id));
+
+// 获取指定模型
+const model = getModel("ollama", "qwen2.5-coder:32b");
+console.log("Model:", model.name, "| Context:", model.contextWindow);
+```
+
+如果模型未找到，`getModel()` 会抛出错误，错误信息中会列出该 provider 下所有可用的模型 ID，方便排查拼写问题。

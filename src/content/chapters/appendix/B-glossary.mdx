@@ -1,0 +1,169 @@
+---
+title: "附录 B：术语表"
+chapter: 91
+description: "教程中使用的关键术语定义"
+---
+
+# 术语表
+
+本术语表收录教程中出现的关键概念。按英文字母排序，每个术语给出中文解释并标注首次出现的章节。
+
+---
+
+## Agent Loop
+
+**Agent 循环**——Agent 的核心运行机制。流程为 `思考 → 工具调用 → 观察结果 → 继续思考`，不断重复直到 LLM 认为任务完成（即 `stopReason` 为 `end_turn`）。这是 ReAct 范式在 Pi 中的具体实现，也是整个框架最核心的概念。
+
+> 首见：第 00 章 —— 总览
+
+---
+
+## Compaction
+
+**上下文压缩**。当消息历史接近上下文窗口（Context Window）上限时，Agent 自动对早期消息进行摘要，用较短的总结替换原始消息，从而释放 token 空间。Compaction 通过 `transformContext` 钩子实现，是 Pi 处理长对话的关键策略。
+
+> 首见：第 02 章 —— 核心循环
+
+---
+
+## Content Block
+
+**内容块**——消息（Message）中的最小内容单元。一条 `AssistantMessage` 可以包含多个内容块：`TextBlock`（文字回复）、`ThinkingBlock`（模型内部推理过程）、`ToolUseBlock`（工具调用请求）。流式输出时，事件流中的 delta 事件对应的就是各个内容块的增量片段。
+
+> 首见：第 04 章 —— 流式输出
+
+---
+
+## Context Window
+
+**上下文窗口**。模型单次请求能处理的最大 token 数量，例如 Claude Sonnet 的上下文窗口为 200k tokens。如果输入超出窗口大小，会触发 API 错误或自动 compaction。上下文窗口大小是选择模型和设计 Agent 策略的重要参考指标。
+
+> 首见：第 02 章 —— 核心循环
+
+---
+
+## EventStream
+
+**事件流**——Pi 的流式数据结构。它同时实现了 `AsyncIterable`（可用 `for await...of` 逐事件消费）和一个 `.result` Promise（直接获取最终聚合结果）。这种双模设计让调用者可以根据场景选择流式处理或一次性获取。
+
+> 首见：第 04 章 —— 流式输出
+
+---
+
+## Follow-up
+
+**追加提问**。在 Agent 循环运行过程中或结束后，注入新的用户消息并让 Agent 继续执行，无需重新启动整个循环。Follow-up 让多轮对话和追问变得自然，Agent 能保留之前的上下文继续工作。
+
+> 首见：第 06 章 —— 构建 Agent
+
+---
+
+## LLM
+
+**Large Language Model（大语言模型）**。Agent 的"大脑"，负责理解用户输入、进行推理、决定下一步行动（例如调用哪个工具或直接回复用户）。Pi 支持多种 LLM provider，包括 Anthropic、OpenAI、Google 等，还可以通过自定义模型配置接入本地或私有部署的模型。
+
+> 首见：第 00 章 —— 总览
+
+---
+
+## Message
+
+**消息**——LLM 对话的基本单位。Pi 定义三种消息类型：`UserMessage`（用户输入）、`AssistantMessage`（模型回复）、`ToolResultMessage`（工具执行结果反馈给模型）。消息按时间顺序组成上下文，传给模型进行推理。
+
+> 首见：第 02 章 —— 核心循环
+
+---
+
+## Model
+
+**模型实例**。Pi 中 `Model` 对象封装了 provider 名称、模型 ID、API 类型（Anthropic / OpenAI）、上下文窗口大小、最大输出 token 数等元信息。通过 `getModel(provider, modelId)` 获取，是调用 LLM 的入口。不同的 Model 可以指向同一个 provider 的不同规格（如 claude-sonnet vs claude-opus）。
+
+> 首见：第 05 章 —— 多模型
+
+---
+
+## Provider
+
+**模型提供商**。提供 LLM API 的服务方，如 Anthropic、OpenAI、Google、Ollama 等。每个 provider 可以提供多个模型，Pi 通过 `models.json` 配置文件注册 provider 及其下属模型。Provider 定义了 API 基地址、认证方式等连接信息。
+
+> 首见：第 05 章 —— 多模型
+
+---
+
+## ReAct
+
+**Reasoning + Acting** 的缩写。一种让 LLM 交替进行推理（Reasoning）和行动（Acting，即调用工具）的经典范式。Pi 的 Agent Loop 就是 ReAct 模式的工程实现：模型先思考该做什么，然后调用工具执行，再观察结果并决定下一步。
+
+> 首见：第 00 章 —— 总览
+
+---
+
+## Steering
+
+**引导/转向**。在 Agent 循环运行中途注入系统级指令，改变 Agent 的行为方向，而无需中断当前循环。与 Follow-up（追加用户消息）不同，Steering 通常用于注入约束条件或策略调整，对用户不可见。
+
+> 首见：第 06 章 —— 构建 Agent
+
+---
+
+## StopReason
+
+**停止原因**——LLM 结束生成的原因标记。常见值包括：`end_turn`（模型自然结束回复）、`tool_use`（模型请求调用工具，循环需要继续）、`max_tokens`（达到最大输出 token 数限制）。Agent Loop 通过检查 `stopReason` 来决定是否继续循环。
+
+> 首见：第 02 章 —— 核心循环
+
+---
+
+## ThinkingLevel
+
+**思考级别**。控制模型在回复前进行多少"内部推理"的参数。Pi 定义四个级别：`none`（不思考）、`low`（轻度思考）、`medium`（中度思考）、`high`（深度思考）。级别越高消耗越多 token，但对复杂推理任务的质量可能更好。并非所有模型都支持此特性。
+
+> 首见：第 05 章 —— 多模型
+
+---
+
+## Token
+
+**词元**——模型处理文本的基本单位。一个英文单词通常对应 1–2 个 token，一个中文字符通常对应 1–2 个 token。Token 数量直接决定 API 调用成本和上下文窗口的占用量，是衡量模型使用开销的核心度量。
+
+> 首见：第 00 章 —— 总览
+
+---
+
+## Tool
+
+**工具**——Agent 可调用的外部能力，例如读写文件、执行终端命令、搜索代码库等。每个工具由四部分组成：名称（`name`）、描述（`description`，帮助 LLM 理解何时使用）、参数 Schema（用 TypeBox 定义）、执行函数（`execute`）。工具系统是 Agent 从"只能说"到"能做事"的关键桥梁。
+
+> 首见：第 03 章 —— 工具系统
+
+---
+
+## ToolCall
+
+**工具调用**——LLM 在回复中发出的工具使用请求。它包含目标工具的名称和调用参数，对应 `AssistantMessage` 中的 `ToolUseBlock` 内容块。Agent Loop 收到 ToolCall 后会执行对应的工具函数，并将结果以 `ToolResult` 的形式返回给模型。
+
+> 首见：第 03 章 —— 工具系统
+
+---
+
+## ToolResult
+
+**工具结果**——工具执行完成后返回给 LLM 的反馈信息。包含三个关键字段：`toolUseId`（关联到触发此次执行的 ToolCall）、`output`（执行输出内容）、`isError`（是否执行出错）。模型根据 ToolResult 决定下一步行动。
+
+> 首见：第 03 章 —— 工具系统
+
+---
+
+## transformContext
+
+**上下文变换函数**。在每次调用 LLM 之前对消息历史进行预处理的钩子函数。常见用途包括：实现 compaction（压缩旧消息）、注入动态系统提示词、裁剪或过滤特定消息等。`transformContext` 接收当前消息数组，返回处理后的新消息数组。
+
+> 首见：第 02 章 —— 核心循环
+
+---
+
+## TypeBox
+
+**JSON Schema 构建库**（`@sinclair/typebox`）。Pi 使用 TypeBox 定义工具参数的类型 Schema。它的优势在于同时提供 JSON Schema 校验（运行时验证参数合法性）和 TypeScript 类型推导（开发时获得完整类型提示），做到一份定义、两种收益。
+
+> 首见：第 03 章 —— 工具系统
