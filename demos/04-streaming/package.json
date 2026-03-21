@@ -1,0 +1,24 @@
+{
+  "name": "@pi-tutorial/demo-04-streaming",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo:01": "npx tsx src/01-event-stream.ts",
+    "demo:02": "npx tsx src/02-stream-text.ts",
+    "demo:03": "npx tsx src/03-stream-tools.ts",
+    "demo:04": "npx tsx src/04-stream-thinking.ts",
+    "demo:05": "npx tsx src/05-proxy-transport.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@pi-tutorial/shared": "*",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "tsx": "^4.19.0",
+    "@types/express": "^5.0.0"
+  }
+}
