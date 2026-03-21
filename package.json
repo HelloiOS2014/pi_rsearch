@@ -12,5 +12,13 @@
     "remotion:dev": "cd remotion && npm run dev",
     "validate-refs": "npx tsx scripts/validate-references.ts"
   },
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "@astrojs/check": "^0.9.8",
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.9.3"
+  }
 }
