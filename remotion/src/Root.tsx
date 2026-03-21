@@ -10,6 +10,8 @@ import { ToolCallFlow } from "./sequences/03-tool-system/ToolCallFlow";
 import { EventTimeline } from "./sequences/04-streaming/EventTimeline";
 import { ProviderAbstract } from "./sequences/05-multi-model/ProviderAbstract";
 import { FullArchitecture } from "./sequences/06-build-agent/FullArchitecture";
+import { FrameworkCompare } from "./sequences/07-comparison/FrameworkCompare";
+import { ExtensionArch } from "./sequences/08-advanced/ExtensionArch";
 
 export const RemotionRoot: React.FC = () => {
   return (
@@ -121,6 +123,26 @@ export const RemotionRoot: React.FC = () => {
         id="FullArchitecture"
         component={FullArchitecture}
         durationInFrames={600}
+        fps={30}
+        width={1920}
+        height={1080}
+      />
+
+      {/* V24: Framework Comparison */}
+      <Composition
+        id="FrameworkCompare"
+        component={FrameworkCompare}
+        durationInFrames={450}
+        fps={30}
+        width={1920}
+        height={1080}
+      />
+
+      {/* V26: Extension Architecture */}
+      <Composition
+        id="ExtensionArch"
+        component={ExtensionArch}
+        durationInFrames={450}
         fps={30}
         width={1920}
         height={1080}

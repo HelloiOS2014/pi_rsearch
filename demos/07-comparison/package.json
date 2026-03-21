@@ -1,0 +1,20 @@
+{
+  "name": "@pi-tutorial/demo-07-comparison",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start:pi": "npx tsx src/pi-style.ts",
+    "start:langchain": "npx tsx src/langchain-style.ts",
+    "start:vercel": "npx tsx src/vercel-ai-style.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@pi-tutorial/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "tsx": "^4.19.0"
+  }
+}

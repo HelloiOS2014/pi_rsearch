@@ -1,0 +1,19 @@
+{
+  "name": "@pi-tutorial/demo-08-extensions",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start:audit": "npx tsx src/01-simple-extension.ts",
+    "start:custom-tool": "npx tsx src/02-custom-tool-ext.ts",
+    "start:event-bus": "npx tsx src/03-event-bus.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pi-tutorial/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "tsx": "^4.19.0"
+  }
+}
