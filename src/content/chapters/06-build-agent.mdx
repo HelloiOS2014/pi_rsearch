@@ -1,0 +1,1348 @@
+---
+title: "构建完整 Agent"
+chapter: 6
+description: "整合前 5 章所有概念，构建完整可用的 coding agent"
+---
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+import VideoEmbed from '../../components/tutorial/VideoEmbed';
+
+# 构建完整 Agent
+
+本章目标：整合前 5 章学到的所有概念 —— Core Loop、工具系统、流式处理、多模型支持 —— 构建一个完整可用的 coding agent。这是整个教程的 capstone 章节。
+
+前 5 章我们分别攻克了一个个独立模块。但一个生产级 Agent 不仅仅是"把模块拼起来"，还需要 System Prompt 设计、会话持久化、上下文压缩、自动重试、配置系统、运行模式切换等大量"胶水"工程。Pi 在这些方面的设计非常值得学习。
+
+---
+
+## 6.1 System Prompt 设计
+
+### 动态 Prompt 构建
+
+大多数 Agent 的 system prompt 是一个硬编码的字符串。Pi 不同 —— 它的 prompt 是**动态组装**的，根据当前启用的工具、加载的 Skills、项目上下文文件自适应调整。
+
+<SourceReader
+  client:visible
+  code={`export interface BuildSystemPromptOptions {
+  /** Custom system prompt (replaces default). */
+  customPrompt?: string;
+  /** Tools to include in prompt. Default: [read, bash, edit, write] */
+  selectedTools?: string[];
+  /** Optional one-line tool snippets keyed by tool name. */
+  toolSnippets?: Record<string, string>;
+  /** Additional guideline bullets appended to the default system prompt guidelines. */
+  promptGuidelines?: string[];
+  /** Text to append to system prompt. */
+  appendSystemPrompt?: string;
+  /** Working directory. Default: process.cwd() */
+  cwd?: string;
+  /** Pre-loaded context files. */
+  contextFiles?: Array<{ path: string; content: string }>;
+  /** Pre-loaded skills. */
+  skills?: Skill[];
+}`}
+  filename="packages/coding-agent/src/core/system-prompt.ts"
+  language="typescript"
+  startLine={19}
+  highlights={[
+    { line: 22, note: "selectedTools 决定 prompt 中列出哪些工具 — 不同工具组合生成不同 guidelines" },
+    { line: 28, note: "promptGuidelines 允许扩展和用户注入额外行为约束" },
+    { line: 32, note: "contextFiles 是项目级 .pi/ 目录下的指令文件，自动注入 prompt" },
+    { line: 34, note: "skills 是可激活的能力模块，格式化后追加到 prompt 末尾" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/system-prompt.ts#L19"
+/>
+
+### Prompt 的五个区域
+
+`buildSystemPrompt` 按固定顺序拼装 prompt，形成五个清晰的区域：
+
+```
+┌────────────────────────────────────────────────┐
+│  1. 角色定义 + 工具列表                          │
+│     "You are an expert coding assistant..."     │
+│     Available tools: read, bash, edit, write    │
+├────────────────────────────────────────────────┤
+│  2. 自适应 Guidelines                           │
+│     根据 selectedTools 动态生成                  │
+│     有 bash+grep? → "Prefer grep over bash"    │
+│     有 read+edit? → "Read before editing"      │
+├────────────────────────────────────────────────┤
+│  3. 文档引用                                    │
+│     Pi docs/examples/README 路径               │
+├────────────────────────────────────────────────┤
+│  4. 项目上下文 (Context Files)                  │
+│     .pi/instructions.md 等项目级指令            │
+│  5. Skills                                     │
+│     格式化的 skill 描述 + 触发条件               │
+├────────────────────────────────────────────────┤
+│  6. 元信息                                      │
+│     Current date: 2025-06-15                   │
+│     Current working directory: /home/user/proj │
+└────────────────────────────────────────────────┘
+```
+
+### 自适应 Guidelines
+
+这是 Pi system prompt 最精妙的设计。Guidelines 不是一个固定列表，而是根据当前启用的工具动态生成：
+
+<SourceReader
+  client:visible
+  code={`// Build guidelines based on which tools are actually available
+const guidelinesList: string[] = [];
+const guidelinesSet = new Set<string>();
+const addGuideline = (guideline: string): void => {
+  if (guidelinesSet.has(guideline)) return;
+  guidelinesSet.add(guideline);
+  guidelinesList.push(guideline);
+};
+
+const hasBash = tools.includes("bash");
+const hasEdit = tools.includes("edit");
+const hasGrep = tools.includes("grep");
+
+// File exploration guidelines
+if (hasBash && !hasGrep && !hasFind && !hasLs) {
+  addGuideline("Use bash for file operations like ls, rg, find");
+} else if (hasBash && (hasGrep || hasFind || hasLs)) {
+  addGuideline("Prefer grep/find/ls tools over bash for file exploration");
+}
+
+// Read before edit guideline
+if (hasRead && hasEdit) {
+  addGuideline("Use read to examine files before editing");
+}`}
+  filename="packages/coding-agent/src/core/system-prompt.ts"
+  language="typescript"
+  startLine={108}
+  highlights={[
+    { line: 110, note: "Set 去重 — 防止多来源注入重复 guideline" },
+    { line: 118, note: "条件逻辑：如果有专用搜索工具，就引导 LLM 优先使用它们而非 bash grep" },
+    { line: 123, note: "只有同时启用 read 和 edit 时才注入 'read before edit' 规则" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/system-prompt.ts#L108"
+/>
+
+**为什么这很重要？** 一个仅开放 bash 工具的受限 Agent 和一个全功能 Agent 需要完全不同的使用指引。静态 prompt 做不到这种自适应 —— 要么过度约束（写了没用的规则），要么约束不足（缺少关键指引）。Pi 的动态方案让 prompt 永远只包含当前相关的内容。
+
+### Demo 06 的 Prompt 设计
+
+我们的 Demo 06 用简化版实现了同样的理念：
+
+<SourceReader
+  client:visible
+  code={`const TOOL_GUIDELINES: Record<string, string> = {
+  read_file:
+    "- Always read a file before attempting to modify it.\\n" +
+    "- Use offset/limit for large files instead of reading everything.",
+  write_file:
+    "- Prefer editing existing files over creating new ones.\\n" +
+    "- Always use absolute file paths.",
+  bash:
+    "- Prefer the search tool over \`grep\` or \`find\` commands.\\n" +
+    "- Use bash for running tests, installing packages, or git operations.",
+  search:
+    "- Use search to find code patterns, function definitions, and references.",
+};
+
+export function buildSystemPrompt(options: PromptOptions): string {
+  const { tools, workingDirectory = process.cwd() } = options;
+  const date = new Date().toISOString().split("T")[0];
+
+  let prompt = \`You are a helpful coding assistant...
+
+Environment:
+- Date: \${date}
+- Working directory: \${workingDirectory}
+\`;
+
+  // Add tool-specific guidelines
+  const relevantGuidelines = tools
+    .map((t) => TOOL_GUIDELINES[t])
+    .filter(Boolean);
+
+  if (relevantGuidelines.length > 0) {
+    prompt += \`\\nTool usage:\\n\${relevantGuidelines.join("\\n")}\\n\`;
+  }
+
+  return prompt;
+}`}
+  filename="demos/06-my-agent/src/prompt.ts"
+  language="typescript"
+  startLine={1}
+  highlights={[
+    { line: 1, note: "工具名 → 使用指引的映射表 — Pi 用条件逻辑，Demo 用静态映射" },
+    { line: 28, note: "按启用工具过滤：只有 tools 列表中的工具才会注入对应 guidelines" }
+  ]}
+/>
+
+---
+
+## 6.2 会话管理
+
+### JSONL 树结构
+
+Pi 的会话存储格式是**带树结构的 JSONL**。每个 entry 都有 `id` 和 `parentId`，形成一棵树而非简单的线性列表。
+
+<SourceReader
+  client:visible
+  code={`export interface SessionEntryBase {
+  type: string;
+  id: string;
+  parentId: string | null;
+  timestamp: string;
+}
+
+// 9 种条目类型
+export type SessionEntry =
+  | SessionMessageEntry       // LLM 消息 (user/assistant/toolResult)
+  | ThinkingLevelChangeEntry  // 切换 thinking level
+  | ModelChangeEntry          // 切换模型
+  | CompactionEntry           // 压缩摘要
+  | BranchSummaryEntry        // 分支摘要
+  | CustomEntry               // 扩展自定义数据 (不参与 LLM 上下文)
+  | CustomMessageEntry        // 扩展注入的上下文消息 (参与 LLM 上下文)
+  | LabelEntry                // 用户书签
+  | SessionInfoEntry          // 会话元数据 (显示名等)`}
+  filename="packages/coding-agent/src/core/session-manager.ts"
+  language="typescript"
+  startLine={43}
+  highlights={[
+    { line: 45, note: "id: 8 位 hex 短 ID，从 UUID 截取 + 碰撞检查" },
+    { line: 46, note: "parentId: 指向父节点，null 表示根节点 — 这使得 fork/branch 成为可能" },
+    { line: 50, note: "SessionMessageEntry 承载 LLM 交互的核心消息" },
+    { line: 53, note: "CompactionEntry 存储压缩后的摘要，下次加载时代替被压缩的消息" },
+    { line: 56, note: "CustomEntry vs CustomMessageEntry: 前者只存数据不进 LLM 上下文，后者两者皆有" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/session-manager.ts#L43"
+/>
+
+**为什么是树而不是列表？** 因为 Pi 支持 **Fork** 操作 —— 在对话的任意节点创建分支，尝试不同的方案。树结构让每个分支都是根到叶的一条路径，多个分支共享公共前缀，不需要复制消息。
+
+### 版本迁移
+
+随着功能演进，session 格式经历了 v1 → v2 → v3 三个版本。Pi 实现了自动迁移：
+
+<SourceReader
+  client:visible
+  code={`export const CURRENT_SESSION_VERSION = 3;
+
+/** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
+function migrateV1ToV2(entries: FileEntry[]): void {
+  const ids = new Set<string>();
+  let prevId: string | null = null;
+
+  for (const entry of entries) {
+    if (entry.type === "session") {
+      entry.version = 2;
+      continue;
+    }
+    entry.id = generateId(ids);
+    entry.parentId = prevId;
+    prevId = entry.id;
+  }
+}
+
+/** Migrate v2 → v3: rename hookMessage role to custom. */
+function migrateV2ToV3(entries: FileEntry[]): void {
+  for (const entry of entries) {
+    if (entry.type === "session") { entry.version = 3; continue; }
+    if (entry.type === "message") {
+      const msgEntry = entry as SessionMessageEntry;
+      if ((msgEntry.message as any).role === "hookMessage") {
+        (msgEntry.message as any).role = "custom";
+      }
+    }
+  }
+}
+
+/** Run all necessary migrations to bring entries to current version. */
+function migrateToCurrentVersion(entries: FileEntry[]): boolean {
+  const header = entries.find(e => e.type === "session") as SessionHeader;
+  const version = header?.version ?? 1;
+  if (version >= CURRENT_SESSION_VERSION) return false;
+
+  if (version < 2) migrateV1ToV2(entries);
+  if (version < 3) migrateV2ToV3(entries);
+  return true;
+}`}
+  filename="packages/coding-agent/src/core/session-manager.ts"
+  language="typescript"
+  startLine={208}
+  highlights={[
+    { line: 210, note: "v1→v2: 最大变化 — 从线性列表升级为树结构，给每个 entry 分配 id/parentId" },
+    { line: 225, note: "v2→v3: 重命名 hookMessage → custom，反映扩展系统的 API 演进" },
+    { line: 237, note: "渐进式迁移：检查当前版本号，按需执行每一步迁移" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/session-manager.ts#L208"
+/>
+
+### buildSessionContext：从树到线性消息
+
+LLM 需要线性的消息列表，但 session 是一棵树。`buildSessionContext` 负责这个转换 —— 从叶子节点向根回溯，收集路径上的所有消息：
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Build the session context from entries using tree traversal.
+ * If leafId is provided, walks from that entry to root.
+ * Handles compaction and branch summaries along the path.
+ */
+export function buildSessionContext(
+  entries: SessionEntry[],
+  leafId?: string | null,
+  byId?: Map<string, SessionEntry>,
+): SessionContext {
+  // Build uuid index if not available
+  if (!byId) {
+    byId = new Map<string, SessionEntry>();
+    for (const entry of entries) {
+      byId.set(entry.id, entry);
+    }
+  }
+  // ...walk from leaf to root, collect messages along the path
+}`}
+  filename="packages/coding-agent/src/core/session-manager.ts"
+  language="typescript"
+  startLine={308}
+  highlights={[
+    { line: 310, note: "从 leafId 向根遍历：每次 fork 后切换到不同的 leaf 即切换分支" },
+    { line: 312, note: "byId 索引避免 O(n) 查找，提升大 session 的性能" }
+  ]}
+/>
+
+### Demo 06 的简化会话
+
+对比 Pi 的树结构，Demo 06 使用简单的 JSONL append-only 存储：
+
+<CodeComparison
+  client:visible
+  left={{
+    label: "Demo 06 — session.ts",
+    language: "typescript",
+    code: `export class Session {
+  private filePath: string;
+  private messages: Message[] = [];
+
+  /** Append a message to the session. */
+  async append(message: Message): Promise<void> {
+    this.messages.push(message);
+    const line = JSON.stringify(message) + "\\n";
+    await appendFile(this.filePath, line, "utf-8");
+  }
+
+  /** Load messages from session file. */
+  async load(): Promise<Message[]> {
+    const content = await readFile(this.filePath, "utf-8");
+    const lines = content.trim().split("\\n").filter(Boolean);
+    this.messages = lines.map(l => JSON.parse(l));
+    return this.messages;
+  }
+}`
+  }}
+  right={{
+    label: "Pi — session-manager.ts",
+    language: "typescript",
+    code: `// Pi 的 SessionManager 支持:
+// - 树结构 (id/parentId)
+// - 9 种条目类型
+// - 版本迁移 (v1→v2→v3)
+// - Fork/Branch 操作
+// - 从任意叶子重建线性上下文
+// - HTML/JSONL 导出
+
+export interface SessionEntryBase {
+  type: string;
+  id: string;         // 8-char hex
+  parentId: string | null;
+  timestamp: string;
+}
+
+// buildSessionContext:
+// 从叶子节点 → 根节点回溯收集消息
+// 遇到 CompactionEntry → 注入摘要
+// 遇到 BranchSummary → 注入分支摘要
+// 结果: 线性的 AgentMessage[] 给 LLM`
+  }}
+/>
+
+核心差异：Demo 06 的线性列表只能 `--continue` 恢复上一次对话；Pi 的树结构支持在对话的任意节点 fork 出新分支，就像 git 的分支模型。
+
+---
+
+## 6.3 上下文压缩 (Compaction)
+
+当对话越来越长，最终会撞上模型的 context window 上限。Pi 通过 **Compaction** 机制解决这个问题 —— 把旧消息压缩成摘要，释放空间给新对话。
+
+### Token 估算
+
+压缩的第一步是知道"当前用了多少 token"。Pi 用 `chars / 4` 的启发式方法估算：
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Estimate token count for a message using chars/4 heuristic.
+ * This is conservative (overestimates tokens).
+ */
+export function estimateTokens(message: AgentMessage): number {
+  let chars = 0;
+
+  switch (message.role) {
+    case "user": {
+      const content = message.content;
+      if (typeof content === "string") {
+        chars = content.length;
+      } else if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === "text" && block.text) {
+            chars += block.text.length;
+          }
+        }
+      }
+      return Math.ceil(chars / 4);
+    }
+    case "assistant": {
+      for (const block of assistant.content) {
+        if (block.type === "text") chars += block.text.length;
+        else if (block.type === "thinking") chars += block.thinking.length;
+        else if (block.type === "toolCall")
+          chars += block.name.length + JSON.stringify(block.arguments).length;
+      }
+      return Math.ceil(chars / 4);
+    }
+    case "toolResult": {
+      // ...similar logic
+      // Images estimated as 4800 chars (≈1200 tokens)
+      return Math.ceil(chars / 4);
+    }
+  }
+  return 0;
+}`}
+  filename="packages/coding-agent/src/core/compaction/compaction.ts"
+  language="typescript"
+  startLine={225}
+  highlights={[
+    { line: 228, note: "chars/4 是一个粗略但实用的估算 — 偏保守（宁可高估也不低估）" },
+    { line: 244, note: "assistant 消息要算 thinking block — 这些也占 token 空间" },
+    { line: 246, note: "toolCall 参数序列化为 JSON 后计算长度 — 因为传给 API 时就是 JSON" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/compaction/compaction.ts#L225"
+/>
+
+为什么用 `chars / 4` 而不是精确的 tokenizer？因为精确 tokenization 需要加载 tokenizer 模型（数 MB），而且不同模型的 tokenizer 不同。`chars / 4` 在英文中非常接近实际值（英文平均 1 token ≈ 4 chars），在中文中会高估（中文 1 字 ≈ 1-2 token），但高估是安全的 —— 最多提前压缩，不会溢出。
+
+### 有效切点 (Cut Points)
+
+压缩不能在任意位置切割消息序列。如果在 toolCall 之后、toolResult 之前切割，LLM 会收到一个"悬空"的工具调用，没有结果。Pi 精确定义了合法的切点：
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Find valid cut points: indices of user, assistant, custom, or
+ * bashExecution messages.
+ * Never cut at tool results (they must follow their tool call).
+ */
+function findValidCutPoints(
+  entries: SessionEntry[],
+  startIndex: number,
+  endIndex: number,
+): number[] {
+  const cutPoints: number[] = [];
+  for (let i = startIndex; i < endIndex; i++) {
+    const entry = entries[i];
+    switch (entry.type) {
+      case "message": {
+        const role = entry.message.role;
+        switch (role) {
+          case "user":
+          case "assistant":
+          case "bashExecution":
+          case "custom":
+          case "branchSummary":
+          case "compactionSummary":
+            cutPoints.push(i);
+            break;
+          case "toolResult":
+            break;  // NEVER cut here!
+        }
+        break;
+      }
+    }
+    // branch_summary and custom_message are user-role, valid cut points
+    if (entry.type === "branch_summary" || entry.type === "custom_message") {
+      cutPoints.push(i);
+    }
+  }
+  return cutPoints;
+}`}
+  filename="packages/coding-agent/src/core/compaction/compaction.ts"
+  language="typescript"
+  startLine={292}
+  highlights={[
+    { line: 297, note: "关键约束：toolResult 永远不是合法切点 — 它必须紧跟 toolCall" },
+    { line: 300, note: "user 和 assistant 是最自然的切点 — 一轮对话的边界" },
+    { line: 302, note: "bashExecution 被当作 user 消息处理 — 它是用户发起的执行" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/compaction/compaction.ts#L292"
+/>
+
+### 压缩流程
+
+完整的压缩流程分为四步：
+
+```
+触发条件:
+  contextTokens > contextWindow - reserveTokens
+
+步骤 1: 估算 token → 判断是否超阈值
+步骤 2: 从末尾向前扫描，保留 keepRecentTokens 的近期消息
+步骤 3: 找到合法切点 → 把旧消息交给 LLM 总结
+步骤 4: 写入 CompactionEntry (包含摘要 + firstKeptEntryId)
+         ↓
+下次加载时，CompactionEntry 替代被压缩的消息
+```
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Check if compaction should trigger based on context usage.
+ */
+export function shouldCompact(
+  contextTokens: number,
+  contextWindow: number,
+  settings: CompactionSettings,
+): boolean {
+  if (!settings.enabled) return false;
+  return contextTokens > contextWindow - settings.reserveTokens;
+}
+
+export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
+  enabled: true,
+  reserveTokens: 16384,   // 16K reserved for prompt + LLM response
+  keepRecentTokens: 20000, // Keep ~20K tokens of recent conversation
+};`}
+  filename="packages/coding-agent/src/core/compaction/compaction.ts"
+  language="typescript"
+  startLine={212}
+  highlights={[
+    { line: 218, note: "reserveTokens 是安全缓冲区 — 留给 system prompt 和下一轮 LLM 响应" },
+    { line: 220, note: "keepRecentTokens: 保留的近期消息量 — 太少则上下文断裂，太多则压缩效果差" }
+  ]}
+/>
+
+### LLM 总结格式
+
+Pi 使用一个精心设计的 prompt 让 LLM 生成结构化摘要：
+
+<SourceReader
+  client:visible
+  code={`const SUMMARIZATION_PROMPT = \`Create a structured context checkpoint summary
+that another LLM will use to continue the work.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish?]
+
+## Constraints & Preferences
+- [Any constraints or requirements mentioned by user]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+### In Progress
+- [ ] [Current work]
+### Blocked
+- [Issues preventing progress]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Data, examples, or references needed to continue]
+
+Keep each section concise. Preserve exact file paths, function names,
+and error messages.\`;`}
+  filename="packages/coding-agent/src/core/compaction/compaction.ts"
+  language="typescript"
+  startLine={447}
+  highlights={[
+    { line: 447, note: "结构化格式确保摘要质量 — 不是自由发挥，而是填充固定模板" },
+    { line: 453, note: "Progress 区分 Done/In Progress/Blocked — 接手的 LLM 立刻知道做到哪了" },
+    { line: 460, note: "Key Decisions 保留决策理由 — 防止新 LLM 重新讨论已决定的事情" }
+  ]}
+/>
+
+### 三种触发方式
+
+| 触发方式 | 条件 | 场景 |
+|---------|------|------|
+| **自动触发** | `contextTokens > contextWindow - reserveTokens` | 正常使用中渐渐接近上限 |
+| **手动触发** | 用户执行 `/compact` 命令 | 主动清理上下文 |
+| **溢出恢复** | LLM 返回 context overflow 错误 | 估算偏低导致实际溢出 |
+
+溢出恢复是最有趣的：Pi 用 `_overflowRecoveryAttempted` 标志限制只尝试一次。如果压缩后重试还是溢出，就放弃并提示用户切换更大的模型。
+
+---
+
+## 6.4 可靠性机制
+
+生产级 Agent 不能因为一个 API 503 就崩溃。Pi 实现了多层可靠性保障。
+
+### 自动重试 (指数退避)
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Check if an error is retryable (overloaded, rate limit, server errors).
+ * Context overflow errors are NOT retryable (handled by compaction instead).
+ */
+private _isRetryableError(message: AssistantMessage): boolean {
+  if (message.stopReason !== "error" || !message.errorMessage) return false;
+
+  // Context overflow is handled by compaction, not retry
+  const contextWindow = this.model?.contextWindow ?? 0;
+  if (isContextOverflow(message, contextWindow)) return false;
+
+  const err = message.errorMessage;
+  return /overloaded|rate.?limit|too many requests|429|500|502|503|504
+    |service.?unavailable|connection.?error|fetch failed|timed? out/i.test(err);
+}`}
+  filename="packages/coding-agent/src/core/agent-session.ts"
+  language="typescript"
+  startLine={2334}
+  highlights={[
+    { line: 2338, note: "关键区分：context overflow 不走重试，走 compaction — 重试只会浪费时间" },
+    { line: 2342, note: "用正则匹配错误消息 — 覆盖所有常见的瞬态错误模式" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/agent-session.ts#L2334"
+/>
+
+**错误分类**是关键。Pi 把错误分为三类：
+
+| 错误类型 | 处理方式 | 举例 |
+|---------|---------|------|
+| **Retryable** | 指数退避重试 | 429, 503, overloaded, rate limit |
+| **Context overflow** | 触发 compaction → 重试 | context too long, max tokens exceeded |
+| **Fatal** | 显示错误，不重试 | 401, 403, invalid_api_key |
+
+重试使用指数退避策略。Demo 06 的实现展示了核心逻辑：
+
+<SourceReader
+  client:visible
+  code={`export async function withRetry<T>(
+  fn: () => Promise<T>,
+  options?: RetryOptions,
+): Promise<T> {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Don't retry on final attempt or non-retryable errors
+      if (attempt === opts.maxRetries || !isRetryable(error)) {
+        throw lastError;
+      }
+
+      // Exponential backoff + jitter
+      const exponentialDelay = opts.baseDelayMs * Math.pow(2, attempt);
+      const jitter = Math.random() * opts.baseDelayMs;
+      const delay = Math.min(exponentialDelay + jitter, opts.maxDelayMs);
+
+      opts.onRetry?.(lastError, attempt + 1, delay);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError ?? new Error("Retry failed");
+}`}
+  filename="demos/06-my-agent/src/retry.ts"
+  language="typescript"
+  startLine={64}
+  highlights={[
+    { line: 75, note: "非 retryable 错误直接抛出 — 不浪费时间重试 auth 错误" },
+    { line: 78, note: "指数退避: 1s → 2s → 4s → 8s... 每次翻倍" },
+    { line: 79, note: "Jitter 随机化: 防止多个 Agent 实例同时重试造成雷群效应" },
+    { line: 80, note: "maxDelayMs 封顶: 防止指数增长到不合理的等待时间" }
+  ]}
+/>
+
+Pi 的 `AgentSession` 在此基础上增加了一个重要特性：**成功即重置**。每次收到成功的 assistant 响应，重试计数器立即归零。这意味着一个 turn 内的多次 LLM 调用（比如多个工具调用后续的 LLM 调用）各自独立计数，不会因为前一次的重试消耗后续调用的重试配额。
+
+### 溢出恢复
+
+当实际 token 超出估算，LLM 返回 context overflow 错误时，Pi 的恢复流程：
+
+```
+LLM 返回 context overflow 错误
+        │
+        ▼
+检查 _overflowRecoveryAttempted
+        │
+    ┌───┴───┐
+    │ false │          │ true │
+    └───┬───┘          └──┬───┘
+        │                 │
+   设为 true          放弃恢复
+   移除错误消息       提示用户切换
+   触发 compaction    更大的模型
+   压缩完成后重试
+```
+
+这个单次限制避免了无限循环 —— 如果压缩后还是溢出，说明问题不在历史消息太多，可能是 system prompt 本身太大或 `keepRecentTokens` 设置过高。
+
+### 认证安全
+
+Pi 的 API Key 管理也值得一提。`AuthStorage` 使用文件锁（`proper-lockfile`）保证多实例安全：
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Credential storage for API keys and OAuth tokens.
+ * Uses file locking to prevent race conditions when multiple pi
+ * instances try to refresh tokens simultaneously.
+ */
+export class FileAuthStorageBackend implements AuthStorageBackend {
+  constructor(
+    private authPath: string = join(getAgentDir(), "auth.json")
+  ) {}
+
+  private ensureFileExists(): void {
+    if (!existsSync(this.authPath)) {
+      writeFileSync(this.authPath, "{}", "utf-8");
+      chmodSync(this.authPath, 0o600); // Owner read/write only
+    }
+  }
+  // withLock<T>(fn): T — uses proper-lockfile for atomic read-modify-write
+}`}
+  filename="packages/coding-agent/src/core/auth-storage.ts"
+  language="typescript"
+  startLine={45}
+  highlights={[
+    { line: 49, note: "auth.json 存储在 ~/.pi/ 下 — 全局共享，不在项目目录中" },
+    { line: 53, note: "chmod 0o600: Unix 安全实践 — 只有文件所有者能读写" }
+  ]}
+/>
+
+<VideoEmbed
+  client:visible
+  title="V19 · Agent 可靠性机制"
+  description="重试、溢出恢复、认证安全的完整流程动画"
+  duration="~30s"
+  compositionId="V19_AgentReliability"
+/>
+
+---
+
+## 6.5 配置系统
+
+### 三级配置解析
+
+Pi 的配置使用三级合并：Global → Project → CLI，优先级从低到高。
+
+<SourceReader
+  client:visible
+  code={`export interface Settings {
+  defaultProvider?: string;
+  defaultModel?: string;
+  defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  transport?: TransportSetting;            // "sse" | "http"
+  steeringMode?: "all" | "one-at-a-time";
+  followUpMode?: "all" | "one-at-a-time";
+  theme?: string;
+  compaction?: CompactionSettings;
+  branchSummary?: BranchSummarySettings;
+  retry?: RetrySettings;
+  hideThinkingBlock?: boolean;
+  shellPath?: string;
+  quietStartup?: boolean;
+  packages?: PackageSource[];
+  extensions?: string[];
+  skills?: string[];
+  prompts?: string[];
+  themes?: string[];
+  enableSkillCommands?: boolean;
+  terminal?: TerminalSettings;
+  images?: ImageSettings;
+  enabledModels?: string[];
+  thinkingBudgets?: ThinkingBudgetsSettings;
+  markdown?: MarkdownSettings;
+  // ...50+ fields total
+}`}
+  filename="packages/coding-agent/src/core/settings-manager.ts"
+  language="typescript"
+  startLine={63}
+  highlights={[
+    { line: 65, note: "defaultModel/Provider: 全局默认使用的模型 — 可被项目级或 CLI 覆盖" },
+    { line: 68, note: "steeringMode 和 followUpMode: 控制第 2 章学的并发消息处理模式" },
+    { line: 71, note: "compaction/retry 设置: 第 6.3 和 6.4 节学到的机制的配置旋钮" },
+    { line: 79, note: "packages/extensions/skills: 扩展生态的入口 — 加载外部能力" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/settings-manager.ts#L63"
+/>
+
+### 深度合并
+
+配置合并不是简单的 `Object.assign` —— 嵌套对象需要递归合并，而数组则直接替换：
+
+<SourceReader
+  client:visible
+  code={`/** Deep merge settings: project/overrides take precedence */
+function deepMergeSettings(base: Settings, overrides: Settings): Settings {
+  const result: Settings = { ...base };
+
+  for (const key of Object.keys(overrides) as (keyof Settings)[]) {
+    const overrideValue = overrides[key];
+    const baseValue = base[key];
+
+    if (overrideValue === undefined) continue;
+
+    // For nested objects, merge recursively
+    if (
+      typeof overrideValue === "object" && overrideValue !== null &&
+      !Array.isArray(overrideValue) &&
+      typeof baseValue === "object" && baseValue !== null &&
+      !Array.isArray(baseValue)
+    ) {
+      (result as any)[key] = { ...baseValue, ...overrideValue };
+    } else {
+      // For primitives and arrays, override value wins
+      (result as any)[key] = overrideValue;
+    }
+  }
+  return result;
+}`}
+  filename="packages/coding-agent/src/core/settings-manager.ts"
+  language="typescript"
+  startLine={99}
+  highlights={[
+    { line: 111, note: "嵌套对象递归合并：项目级只覆盖 compaction.reserveTokens 不影响 compaction.enabled" },
+    { line: 115, note: "数组直接替换而非合并 — 项目设置的 extensions 列表完全覆盖全局列表" }
+  ]}
+/>
+
+```
+配置文件位置:
+  Global:  ~/.pi/settings.json       ← 全局默认
+  Project: ./.pi/settings.json       ← 项目覆盖
+  CLI:     --model xxx --thinking high ← 命令行最高优先级
+
+合并顺序:
+  base = DEFAULTS
+  merged = deepMerge(base, globalSettings)
+  merged = deepMerge(merged, projectSettings)
+  final = deepMerge(merged, cliOverrides)
+```
+
+### Demo 06 的三级配置
+
+Demo 06 实现了同样的理念，用更简洁的方式：
+
+<SourceReader
+  client:visible
+  code={`export interface AgentConfig {
+  model: string;
+  provider: string;
+  apiKey: string;
+  maxTokens: number;
+  thinkingLevel: "none" | "low" | "medium" | "high";
+}
+
+const DEFAULTS: AgentConfig = {
+  model: "claude-sonnet-4-20250514",
+  provider: "anthropic",
+  apiKey: "",
+  maxTokens: 8192,
+  thinkingLevel: "none",
+};
+
+/** Resolve config with three-level merge: defaults → user → env */
+export async function resolveConfig(
+  overrides?: Partial<AgentConfig>,
+): Promise<AgentConfig> {
+  const userConfig = await loadUserConfig();  // ~/.pi-tutorial/config.json
+  const envConfig = loadEnvConfig();           // PI_MODEL, ANTHROPIC_API_KEY, etc.
+
+  return {
+    ...DEFAULTS,
+    ...userConfig,
+    ...envConfig,
+    ...overrides,
+  };
+}`}
+  filename="demos/06-my-agent/src/config-resolver.ts"
+  language="typescript"
+  startLine={1}
+  highlights={[
+    { line: 17, note: "DEFAULTS 是最低优先级 — 保证即使没有任何配置也能正常启动" },
+    { line: 24, note: "三级展开：后面的覆盖前面的 — TypeScript 对象展开的天然优先级" }
+  ]}
+/>
+
+---
+
+## 6.6 三种运行模式
+
+Pi 支持三种运行模式，所有模式共享同一个 `AgentSession` 核心：
+
+```
+                  ┌─────────────┐
+                  │ AgentSession │
+                  │  (核心逻辑)  │
+                  └──────┬──────┘
+                         │
+           ┌─────────────┼─────────────┐
+           ▼             ▼             ▼
+   ┌───────────┐  ┌───────────┐  ┌───────────┐
+   │Interactive│  │   Print   │  │    RPC    │
+   │  (TUI)   │  │  (单次)   │  │ (IDE集成) │
+   └───────────┘  └───────────┘  └───────────┘
+```
+
+### Interactive 模式 (TUI)
+
+这是 Pi 的默认模式。`InteractiveMode` 类实现了一个完整的终端 UI，包含编辑器、消息渲染、工具进度显示等。核心文件 `interactive-mode.ts` 有 **4,570 行**。
+
+```typescript
+// packages/coding-agent/src/modes/interactive/interactive-mode.ts
+export class InteractiveMode {
+  private session: AgentSession;
+  private ui: TUI;
+  // 处理键盘事件、渲染消息、管理编辑器状态...
+  // Ctrl+P 切换模型、Ctrl+T 切换 thinking level
+  // ESC-ESC 打开 tree view、/ 激活 slash commands
+  async run(): Promise<void> { /* 主事件循环 */ }
+}
+```
+
+### Print 模式
+
+非交互式，适合 CI/CD 或脚本调用。执行一次 prompt，输出结果，退出。
+
+```typescript
+// 命令行使用:
+// pi -p "Fix the bug in auth.ts"        ← text 模式
+// pi -p "Fix the bug" --output-format json  ← JSON 事件流
+
+export async function runPrintMode(
+  session: AgentSession,
+  options: PrintModeOptions,
+): Promise<void> {
+  // 发送消息 → 收集输出 → 写到 stdout → 退出
+}
+```
+
+### RPC 模式
+
+为 IDE 集成设计。通过 stdin/stdout 的 JSONL 协议通信：
+
+```typescript
+// 启动: pi --rpc
+// IDE 通过 stdin 发送 JSON 命令，通过 stdout 接收事件
+
+export async function runRpcMode(session: AgentSession): Promise<never> {
+  // stdin: { type: "prompt", text: "fix bug" }
+  // stdout: { type: "text_delta", text: "I'll..." }
+  // stdout: { type: "tool_start", name: "read", ... }
+  // ...
+}
+```
+
+三种模式的共同点是：它们都不包含业务逻辑。所有的 prompt 处理、工具执行、重试、压缩都在 `AgentSession` 中完成。模式只负责 I/O 层面的适配。
+
+---
+
+## 6.7 动手：构建你的 Agent
+
+### Demo 06 架构
+
+Demo 06 是整个教程的 capstone —— 一个完整的 coding agent，包含 7 个文件，每个文件对应 Pi 的一个核心模块：
+
+```
+demos/06-my-agent/src/
+├── main.ts           ← 入口 + Interactive REPL (Pi: InteractiveMode)
+├── agent.ts          ← Agent 核心循环 + 事件系统 (Pi: AgentSession)
+├── prompt.ts         ← 动态 System Prompt (Pi: system-prompt.ts)
+├── session.ts        ← JSONL 会话持久化 (Pi: SessionManager)
+├── retry.ts          ← 指数退避重试 (Pi: agent-session.ts retry)
+├── config-resolver.ts ← 三级配置解析 (Pi: SettingsManager)
+├── auth-manager.ts   ← API Key 管理 (Pi: AuthStorage)
+└── tools/
+    ├── read.ts       ← 文件读取工具 (Pi: read tool)
+    ├── write.ts      ← 文件写入工具 (Pi: write tool)
+    ├── bash.ts       ← Shell 执行工具 (Pi: bash tool)
+    └── search.ts     ← 代码搜索工具 (Pi: grep tool)
+```
+
+### Demo vs Pi 模块映射
+
+| Demo 06 文件 | Pi 对应模块 | 简化了什么 |
+|-------------|-----------|-----------|
+| `agent.ts` | `agent-session.ts` | 无树结构、无 fork、无扩展事件 |
+| `prompt.ts` | `system-prompt.ts` | 静态映射代替条件逻辑、无 Skills/Context Files |
+| `session.ts` | `session-manager.ts` | 线性 JSONL、无 id/parentId、无版本迁移 |
+| `retry.ts` | `agent-session.ts` | 独立函数、无成功重置、无溢出恢复 |
+| `config-resolver.ts` | `settings-manager.ts` | 6 个字段 vs 50+、无深度合并 |
+| `auth-manager.ts` | `auth-storage.ts` | 无文件锁、无 OAuth |
+| `main.ts` | `InteractiveMode` | readline REPL vs 4,570 行 TUI |
+
+### Agent 核心：agent.ts
+
+Demo 06 的 `Agent` 类是前 5 章所有概念的整合：
+
+<SourceReader
+  client:visible
+  code={`export class Agent {
+  private client: Anthropic;
+  private config: AgentConfig;
+  private session: Session;
+  private systemPrompt: string;
+  private onEvent: EventHandler;
+  private abortController: AbortController | null = null;
+
+  constructor(config: AgentConfig, options?: {
+    session?: Session;
+    onEvent?: EventHandler;
+  }) {
+    this.config = config;
+    this.client = new Anthropic({ apiKey: config.apiKey });
+    this.session = options?.session ?? new Session();
+    this.onEvent = options?.onEvent ?? (() => {});
+    this.systemPrompt = buildSystemPrompt({
+      tools: ALL_TOOLS.map(t => t.name),
+    });
+  }`}
+  filename="demos/06-my-agent/src/agent.ts"
+  language="typescript"
+  startLine={40}
+  highlights={[
+    { line: 41, note: "四大依赖注入: API client、配置、会话、事件处理 — 每个都可以独立测试和替换" },
+    { line: 50, note: "System prompt 在构造时一次性构建 — Pi 的则在每次 prompt() 时动态重建" },
+    { line: 46, note: "AbortController 用于 Ctrl+C 中止 — 第 4 章学到的信号传播机制" }
+  ]}
+/>
+
+### Agentic Loop
+
+`prompt()` 方法实现了完整的 agentic loop，整合了第 2-5 章的所有概念：
+
+<SourceReader
+  client:visible
+  code={`async prompt(userMessage: string): Promise<string> {
+  this.abortController = new AbortController();
+  const messages = this.session.getMessages();
+  messages.push({ role: "user", content: userMessage });
+  await this.session.append({ role: "user", content: userMessage });
+
+  this.emit({ type: "agent_start", model: this.config.model });
+
+  let turnNumber = 0;
+  const MAX_TURNS = 20;
+
+  while (turnNumber < MAX_TURNS) {
+    if (this.abortController.signal.aborted) break;
+    turnNumber++;
+    this.emit({ type: "turn_start", turnNumber });
+
+    // Call the API with retry (Ch.6.4)
+    const response = await withRetry(
+      () => this.client.messages.create({
+        model: this.config.model,
+        max_tokens: this.config.maxTokens,
+        system: this.systemPrompt,
+        tools: ALL_TOOLS as Anthropic.Messages.Tool[],
+        messages,
+      }),
+      { maxRetries: 3, onRetry: (err, attempt, delay) => {
+        this.emit({ type: "error", error: new Error(
+          \`Retry \${attempt} in \${Math.round(delay)}ms: \${err.message}\`
+        )});
+      }},
+    );
+
+    // Process response content blocks
+    let fullText = "";
+    const toolUseBlocks: Anthropic.Messages.ToolUseBlock[] = [];
+
+    for (const block of response.content) {
+      if (block.type === "text") {
+        fullText += block.text;
+        this.emit({ type: "text_delta", text: block.text });
+      } else if (block.type === "tool_use") {
+        toolUseBlocks.push(block);
+      }
+    }
+
+    // Add assistant message to conversation
+    messages.push({ role: "assistant", content: response.content });
+    await this.session.append({ role: "assistant", content: response.content });
+
+    // If no tool calls, we're done
+    if (toolUseBlocks.length === 0) {
+      this.emit({ type: "agent_end", totalTurns: turnNumber });
+      return fullText;
+    }
+
+    // Execute tool calls (Ch.3)
+    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+    for (const toolBlock of toolUseBlocks) {
+      if (this.abortController.signal.aborted) break;
+      this.emit({ type: "tool_start", name: toolBlock.name, id: toolBlock.id });
+
+      const executor = TOOL_EXECUTORS[toolBlock.name];
+      let result: string;
+      try {
+        result = executor
+          ? await executor(toolBlock.input as Record<string, unknown>)
+          : \`Unknown tool: \${toolBlock.name}\`;
+      } catch (err) {
+        result = \`Error: \${err instanceof Error ? err.message : String(err)}\`;
+      }
+
+      this.emit({ type: "tool_end", name: toolBlock.name, result });
+      toolResults.push({
+        type: "tool_result", tool_use_id: toolBlock.id, content: result,
+      });
+    }
+
+    // Add tool results to conversation
+    messages.push({ role: "user", content: toolResults });
+    await this.session.append({ role: "user", content: toolResults });
+  }
+
+  this.emit({ type: "agent_end", totalTurns: turnNumber });
+  return "(max turns reached)";
+}`}
+  filename="demos/06-my-agent/src/agent.ts"
+  language="typescript"
+  startLine={65}
+  highlights={[
+    { line: 71, note: "MAX_TURNS = 20: 安全阀 — 防止 Agent 无限循环" },
+    { line: 76, note: "withRetry 包裹 API 调用 — 第 6.4 节的重试逻辑" },
+    { line: 95, note: "stop_reason 判断: 没有 tool_use 块 → Agent 认为任务完成" },
+    { line: 101, note: "工具执行: 查表 → 执行 → 捕获错误 → 返回结果给 LLM" },
+    { line: 112, note: "tool results 作为 user message 追加 — 这是 Anthropic API 的协议要求" }
+  ]}
+/>
+
+对比 Pi 的 `AgentSession`：
+
+<CodeComparison
+  client:visible
+  left={{
+    label: "Demo 06 — Agent.prompt()",
+    language: "typescript",
+    code: `// ~120 行，实现完整 agentic loop:
+// 1. 添加 user message → session
+// 2. while (turnNumber < MAX_TURNS)
+//    a. withRetry → client.messages.create()
+//    b. 处理 text blocks → emit events
+//    c. 处理 tool_use blocks → execute tools
+//    d. tool results → session
+//    e. 无 tool calls → return
+// 3. emit agent_end
+
+// 缺少的特性:
+// - Streaming (使用 create 而非 stream)
+// - Steering/Follow-up 消息队列
+// - 自动 compaction
+// - 溢出恢复
+// - 扩展事件系统`
+  }}
+  right={{
+    label: "Pi — AgentSession",
+    language: "typescript",
+    code: `// AgentSession 在 Agent (core loop) 之上增加:
+class AgentSession {
+  // 事件系统
+  private _eventListeners: AgentSessionEventListener[];
+  // 消息队列
+  private _steeringMessages: string[];
+  private _followUpMessages: string[];
+  // 压缩状态
+  private _overflowRecoveryAttempted = false;
+  // 重试状态
+  private _retryAttempt = 0;
+  // 扩展系统
+  private _extensionRunner: ExtensionRunner;
+
+  // 核心方法: prompt → agent.run →
+  //   _processAgentEvent → 持久化 + 重试 + 压缩
+  // fork → 创建新分支
+  // compact → 手动/自动压缩
+  // cycleModel → 切换模型
+}`
+  }}
+/>
+
+### 事件系统
+
+Demo 06 的事件系统是轻量级的回调模式：
+
+```typescript
+// 8 种事件类型覆盖完整生命周期
+export type AgentEvent =
+  | { type: "agent_start"; model: string }
+  | { type: "turn_start"; turnNumber: number }
+  | { type: "message_start" }
+  | { type: "text_delta"; text: string }
+  | { type: "message_end"; text: string }
+  | { type: "tool_start"; name: string; id: string }
+  | { type: "tool_end"; name: string; result: string }
+  | { type: "agent_end"; totalTurns: number }
+  | { type: "error"; error: Error };
+```
+
+Pi 在此基础上增加了 `auto_compaction_start/end` 和 `auto_retry_start/end` 事件，让 UI 层能展示更丰富的状态信息。
+
+### REPL 入口
+
+`main.ts` 实现了一个完整的交互式 REPL，支持 slash commands：
+
+<SourceReader
+  client:visible
+  code={`async function main() {
+  const flags = parseArgs();
+  const mock = await isMockMode();
+
+  // Resolve config (三级合并: defaults → user → env)
+  const config = await resolveConfig({
+    model: flags.model as string | undefined,
+    apiKey: mock ? "mock" : undefined,
+  });
+
+  // Session setup
+  const session = new Session();
+  if (flags.continue) {
+    const loaded = await session.load();
+    if (loaded.length > 0) {
+      console.log(\`Resumed session with \${loaded.length} messages.\`);
+    }
+  }
+
+  console.log("=".repeat(50));
+  console.log("  My Agent - Pi Tutorial Capstone");
+  console.log("=".repeat(50));
+  console.log(\`Model: \${config.model}\`);
+  console.log(\`Mode:  \${mock ? "mock (no API key)" : "live"}\`);
+
+  // Interactive REPL
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+  const promptUser = () => {
+    rl.question("> ", async (input) => {
+      const trimmed = input.trim();
+      if (!trimmed) { promptUser(); return; }
+
+      // Handle slash commands
+      if (trimmed.startsWith("/")) {
+        await handleSlashCommand(trimmed, session);
+        promptUser();
+        return;
+      }
+
+      // Real agent call
+      const agent = new Agent(config, {
+        session,
+        onEvent: createEventHandler(),
+      });
+
+      try {
+        await agent.prompt(trimmed);
+      } catch (err) {
+        console.error(\`[Error] \${err instanceof Error ? err.message : err}\`);
+      }
+
+      promptUser();
+    });
+  };
+
+  promptUser();
+}`}
+  filename="demos/06-my-agent/src/main.ts"
+  language="typescript"
+  startLine={130}
+  highlights={[
+    { line: 134, note: "resolveConfig: 三级配置解析的入口 — 第 6.5 节的概念" },
+    { line: 141, note: "--continue 标志: 从 JSONL 文件恢复上一次会话" },
+    { line: 159, note: "slash commands: /clear, /session, /help — Pi 有 30+ 个" },
+    { line: 165, note: "每次 prompt 创建新的 Agent 实例 — Pi 复用同一个 AgentSession" }
+  ]}
+/>
+
+### 运行 Demo 06
+
+```bash
+# 安装依赖
+cd demos/06-my-agent && npm install
+
+# 使用真实 API key
+export ANTHROPIC_API_KEY=sk-ant-...
+npx tsx src/main.ts
+
+# 或使用 mock 模式（无需 API key）
+npx tsx src/main.ts
+
+# 单次执行模式（类似 Pi 的 print mode）
+npx tsx src/main.ts "list files in the current directory"
+
+# 恢复上次会话
+npx tsx src/main.ts --continue
+```
+
+---
+
+## 6.8 本章小结
+
+本章是整个教程的 capstone。我们把前 5 章学到的概念整合成一个完整的 coding agent：
+
+### 概念回顾
+
+| 章节 | 核心概念 | 在 Demo 06 中的体现 |
+|------|---------|-------------------|
+| **第 1 章** Agent 全景 | LLM + Tools + Loop | `Agent` 类 = `Anthropic` + `TOOL_EXECUTORS` + `while` |
+| **第 2 章** 核心循环 | 双层循环、stop_reason | `prompt()` 的 while 循环 + tool_use 检测 |
+| **第 3 章** 工具系统 | Schema → 验证 → 执行 | `tools/` 目录：4 个工具各自定义 Schema + executor |
+| **第 4 章** 流式处理 | EventStream、text_delta | `AgentEvent` 类型 + `onEvent` 回调 |
+| **第 5 章** 多模型 | Provider 抽象、API Key 解析 | `config-resolver.ts` 的 provider/model 配置 |
+| **第 6 章** 完整 Agent | 上面全部 + 会话/压缩/重试/配置 | 7 个文件的完整实现 |
+
+### Pi 的设计哲学
+
+通过 6 章的学习，我们可以提炼出 Pi 的核心设计原则：
+
+**1. 分层不分裂** — `pi-ai` / `pi-agent-core` / `pi-coding-agent` 三层各有清晰职责，但通过统一的类型系统无缝连接。`AgentMessage` 从最底层的 `Message` 扩展，贯穿所有层。
+
+**2. 纯函数 + 状态隔离** — `agentLoop()` 是纯函数，`buildSystemPrompt()` 是纯函数，`compact()` 是纯函数。状态被封装在 `AgentSession` 和 `SessionManager` 中，I/O 被推到运行模式层。
+
+**3. 自适应而非硬编码** — system prompt 根据工具集自适应，guidelines 根据启用功能动态生成，compaction 根据 token 使用量自动触发。
+
+**4. 安全边界无处不在** — `MAX_TURNS` 防止无限循环，`_overflowRecoveryAttempted` 防止无限重试，`isRetryable()` 区分可重试和不可重试错误，`chmod 0o600` 保护 API key 文件。
+
+**5. 渐进式复杂度** — Demo 06 用 ~400 行代码实现了 Pi ~10,000 行代码的核心功能子集。Pi 的额外复杂度来自生产级需求：树形会话、版本迁移、多模式支持、扩展系统、TUI 渲染。但核心理念完全一致。
+
+### 从 Demo 到生产
+
+如果你想把 Demo 06 发展成一个生产级 Agent，以下是关键的升级路径：
+
+```
+Demo 06 (当前)                    Production Agent
+─────────────────                 ─────────────────
+线性 JSONL session         →      树结构 + fork/branch
+chars/4 无 compaction      →      自动 compaction + 结构化摘要
+简单重试                    →      重试 + 溢出恢复 + 成功重置
+readline REPL              →      TUI / Print / RPC 三模式
+4 个工具                    →      7+ 工具 + 扩展系统
+单模型                      →      多模型 + 热切换
+硬编码 guidelines          →      自适应 guidelines + Skills
+```
+
+每一步都是前一步的自然延伸，没有架构上的断裂。这就是为什么我们说 Pi 的设计是**渐进式**的 —— 从最简单的 while 循环开始，一步步叠加能力，最终成为一个功能完整的 coding agent。
+
+恭喜你完成了整个教程！你现在理解了一个生产级 coding agent 从内到外的每一个组件。
