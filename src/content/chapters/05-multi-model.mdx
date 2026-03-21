@@ -1,0 +1,982 @@
+---
+title: "多模型统一"
+chapter: 5
+description: "理解 20+ provider 统一适配，跨 provider 消息转换，Thinking 统一，生产环境必备"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+import VideoEmbed from '../../components/tutorial/VideoEmbed';
+
+# 多模型统一
+
+本章目标：理解 Pi 如何将 20+ LLM provider 统一成一套接口 —— 从 Provider 注册、消息转换、Thinking 映射，到 Unicode 清理、OAuth 认证、自定义模型配置。这是整个教程信息密度最高的一章，因为多模型统一是生产级 Agent 与 demo 之间最大的鸿沟。
+
+上一章我们掌握了流式与事件系统。但所有的流式事件都来自 "某个 provider"，而用户只想说 "帮我用最好的模型"。Pi 的多模型统一层让这句话成为可能：Model → Api → Provider 三层抽象，加上一套消息转换管道，使得切换模型只需改两个字符串。
+
+---
+
+## 5.1 Provider 抽象
+
+### Model → Api → Provider 三层体系
+
+Pi 的多模型抽象不是简单的 "if/else 分支"，而是精心设计的三层结构：
+
+```
+Model（具体模型）
+  例: "claude-sonnet-4-5-20250514", "gpt-4o", "gemini-2.5-pro"
+  ↓ 属于
+Api（接口协议）
+  例: "anthropic", "openai", "google", "bedrock", "mistral"
+  ↓ 注册到
+Provider（流式实现）
+  例: streamAnthropic(), streamOpenAI(), streamGoogle()
+```
+
+为什么不是两层（Model → Provider）？因为 **同一个 Provider 可能支持多种 Api 协议**。例如 Amazon Bedrock 提供 Anthropic 和 Meta 模型，但使用 Bedrock 自己的认证和 API 格式。OpenAI 的 Completions API 和 Responses API 虽然来自同一个 provider，但消息格式完全不同。三层分离让每一层都可以独立变化。
+
+### registerApiProvider()：注册中心
+
+Pi 的 Provider 注册系统实现在 `api-registry.ts` 中，核心只有一个 Map：
+
+<SourceReader
+  client:visible
+  code={`export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> {
+  api: TApi;
+  stream: StreamFunction<TApi, TOptions>;
+  streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
+}
+
+const apiProviderRegistry = new Map<string, RegisteredApiProvider>();
+
+export function registerApiProvider<TApi extends Api, TOptions extends StreamOptions>(
+  provider: ApiProvider<TApi, TOptions>,
+  sourceId?: string,
+): void {
+  apiProviderRegistry.set(provider.api, {
+    provider: {
+      api: provider.api,
+      stream: wrapStream(provider.api, provider.stream),
+      streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
+    },
+    sourceId,
+  });
+}`}
+  filename="packages/ai/src/api-registry.ts"
+  language="typescript"
+  startLine={23}
+  highlights={[
+    { line: 23, note: "ApiProvider 泛型接口：TApi 约束协议类型，TOptions 约束流选项" },
+    { line: 26, note: "每个 Provider 必须实现 stream 和 streamSimple 两个函数" },
+    { line: 28, note: "核心就是一个 Map<string, RegisteredApiProvider>，按 api 名称索引" },
+    { line: 30, note: "registerApiProvider 是全局注册函数，启动时调用" },
+    { line: 31, note: "sourceId 用于批量卸载：unregisterApiProviders(sourceId) 可删除某个来源的所有 provider" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/api-registry.ts#L23"
+/>
+
+注意 `stream` 和 `streamSimple` 的分离。`stream` 是完整版，支持 Thinking、tool_use 等高级特性；`streamSimple` 是简化版，只需要文本输出，用于内部辅助调用（如生成 commit message、摘要等）。两者共享同一个 Provider 注册，但走不同的代码路径。
+
+### wrapStream 的类型安全守卫
+
+注册时 `wrapStream` 函数包了一层类型检查：
+
+<SourceReader
+  client:visible
+  code={`function wrapStream<TApi extends Api, TOptions extends StreamOptions>(
+  api: TApi,
+  stream: StreamFunction<TApi, TOptions>,
+): ApiStreamFunction {
+  return (model, context, options) => {
+    if (model.api !== api) {
+      throw new Error(\`Mismatched api: \${model.api} expected \${api}\`);
+    }
+    return stream(model as Model<TApi>, context, options as TOptions);
+  };
+}`}
+  filename="packages/ai/src/api-registry.ts"
+  language="typescript"
+  startLine={42}
+  highlights={[
+    { line: 47, note: "运行时检查：模型的 api 必须匹配 Provider 的 api。防止把 OpenAI 模型发给 Anthropic Provider" },
+    { line: 49, note: "类型断言：通过运行时检查后，安全地把泛型 Model 窄化为 Model<TApi>" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/api-registry.ts#L42"
+/>
+
+这是 "运行时类型守卫 + 编译时类型断言" 的经典模式。TypeScript 的泛型在编译后消失，Pi 通过运行时的 `model.api !== api` 检查来保证类型安全。
+
+### 懒加载与 sourceId
+
+Provider 的注册是懒加载的。Pi 不会在启动时加载所有 20+ provider 的 SDK，而是按需注册：
+
+```typescript
+// 只在用户选择 Anthropic 模型时才加载
+if (selectedModel.api === "anthropic") {
+  const { registerAnthropic } = await import("./providers/anthropic.js");
+  registerAnthropic();
+}
+```
+
+`sourceId` 参数支持批量卸载。当用户切换配置或断开 OAuth 连接时，可以一次性清理某个来源的所有 Provider：
+
+<SourceReader
+  client:visible
+  code={`export function unregisterApiProviders(sourceId: string): void {
+  for (const [api, entry] of apiProviderRegistry.entries()) {
+    if (entry.sourceId === sourceId) {
+      apiProviderRegistry.delete(api);
+    }
+  }
+}`}
+  filename="packages/ai/src/api-registry.ts"
+  language="typescript"
+  startLine={88}
+  highlights={[
+    { line: 88, note: "按 sourceId 批量清理 — 例如 OAuth token 过期时清除所有该账号注册的 Provider" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/api-registry.ts#L88"
+/>
+
+### StreamFunction 契约：绝不 throw
+
+所有 Provider 的 `StreamFunction` 遵循一个核心契约：**绝不 throw 异常**。错误通过事件流中的 error 事件传递，而不是抛出 JavaScript 异常。
+
+```typescript
+// 错误的做法（会导致调用者无法正常清理资源）
+async function* streamBad(): AssistantMessageEventStream {
+  throw new Error("API key invalid");
+}
+
+// 正确的做法（通过事件传递错误）
+async function* streamGood(): AssistantMessageEventStream {
+  yield { type: "error", error: new Error("API key invalid") };
+}
+```
+
+这个契约确保了 `for await...of` 消费者永远能正常退出循环，不会因为未捕获异常导致资源泄露。
+
+---
+
+## 5.2 Provider 适配器解剖
+
+Pi 内置支持 6 个主要 Provider，每个都有独特的适配挑战。我们不逐行看代码，而是聚焦每个 Provider 最有趣的技术决策。
+
+### Anthropic
+
+| 特性 | 实现细节 |
+|------|----------|
+| **认证** | API Key 或 OAuth PKCE（见 5.6） |
+| **Adaptive Thinking** | `thinking.budget_tokens` 参数，支持 1024~128K 预算范围 |
+| **Tool ID 规范** | `^[a-zA-Z0-9_-]+$`，最长 64 字符。OpenAI 的 450+ 字符 ID 必须截断 |
+| **Redacted Thinking** | 加密的 thinking block，只能在同模型间传递，跨模型必须丢弃 |
+| **Prompt Caching** | `cache_control: { type: "ephemeral" }` 标记，缓存命中时 input 价格降低 90% |
+
+Anthropic 的 Tool ID 规范是跨 Provider 转换的主要瓶颈。OpenAI Responses API 生成的 ID 可能超过 450 字符且包含 `|` 分隔符，必须在转换时进行 normalize。
+
+### OpenAI
+
+| 特性 | 实现细节 |
+|------|----------|
+| **双 API 模式** | Completions API（`/v1/chat/completions`）和 Responses API（`/v1/responses`）并存 |
+| **Service Tier** | `service_tier: "auto"` 可启用优先队列，高峰期降低延迟 |
+| **Pipe-separated ID** | Responses API 的 tool_call ID 格式为 `call_abc\|123\|def`，含 `\|` 分隔符 |
+| **Reasoning Effort** | `reasoning_effort: "low" \| "medium" \| "high"` 替代 budget_tokens |
+| **Encrypted Reasoning** | `thinkingSignature` 不透明签名，只能在同模型间传递 |
+
+OpenAI 的双 API 模式是适配的主要复杂度来源。Completions API 返回 `choices[0].delta`，Responses API 返回完全不同的事件结构。Pi 的适配器将两者统一成同一个 `AssistantMessageEventStream`。
+
+### Google (Gemini)
+
+| 特性 | 实现细节 |
+|------|----------|
+| **多入口** | Google AI Studio（API Key）和 Vertex AI（GCP Service Account）使用不同的 SDK |
+| **工具 ID 兜底** | Gemini 的 function call 不返回 tool ID，Pi 生成 `gemini_tool_<uuid>` 填充 |
+| **Thinking Mapping** | `thinking_config.thinking_budget` 映射到 Pi 的 6 级 ThinkingLevel |
+| **Grounding** | 支持 Google Search 作为内置工具（grounding tool），不走标准 tool 流程 |
+
+Google 的 "没有 tool ID" 是一个典型的 "你以为是 bug 但其实是 feature" 的设计差异。Gemini 的 function calling 使用函数名作为隐式 ID，Pi 必须在适配层生成唯一 ID 来满足内部的 toolCallId 关联机制。
+
+### Bedrock
+
+| 特性 | 实现细节 |
+|------|----------|
+| **7 级认证链** | Environment → SharedIni → SSO → Web Identity → EC2 Instance → Container → IMDS |
+| **Converse API** | 使用 `@aws-sdk/client-bedrock-runtime` 的 ConverseStreamCommand |
+| **Region 路由** | 同一个模型可能在不同 Region 有不同的配额和延迟 |
+| **Cross-region Inference** | 通过 inference profile 实现跨 Region 负载均衡 |
+
+Bedrock 的 7 级认证链是 AWS 生态的标准做法，但在 CLI 工具中需要特别处理：用户可能同时配置了环境变量、`~/.aws/credentials` 和 SSO profile，认证链会按优先级自动选择。
+
+### Mistral
+
+| 特性 | 实现细节 |
+|------|----------|
+| **9 字符 Tool ID** | Mistral 要求 tool_call_id 正好 9 个字符（`^[a-zA-Z0-9]{9}$`） |
+| **x-affinity** | 响应头中的 `x-affinity` 值，后续请求需在 header 中携带以保持会话亲和性 |
+| **FIM 支持** | 支持 Fill-in-the-Middle（代码补全），使用 `[PREFIX]...[SUFFIX]` 格式 |
+
+Mistral 的 9 字符 ID 限制是所有 Provider 中最严格的。Pi 使用哈希截断来满足：`id.slice(0, 9)` 或 `hash(id).slice(0, 9)`。
+
+---
+
+## 5.3 跨 Provider 消息转换
+
+### 为什么需要消息转换？
+
+当用户在对话中途切换模型（例如从 Claude 切到 GPT-4o），历史消息中可能包含：
+
+1. **Thinking blocks** — Claude 的 `<thinking>` 在 OpenAI 中不存在
+2. **Provider-specific tool ID** — `toolu_01ABC...` vs `call_ABC...`
+3. **Redacted thinking** — 加密内容，只有原模型能解密
+4. **Orphaned tool calls** — 切换时中断的工具调用没有对应的结果
+
+如果不转换直接发送，目标 Provider 的 API 会返回 400 错误。
+
+### transformMessages 三阶段管道
+
+Pi 的 `transformMessages` 函数实现了一个三阶段管道：内容转换 → ID 映射 → 孤儿修复。
+
+<VideoEmbed
+  client:visible
+  compositionId="V15"
+  title="跨 Provider 消息转换管道"
+  description="可视化三阶段管道：thinking 转换、ID 映射、孤儿修复"
+/>
+
+<SourceReader
+  client:visible
+  code={`export function transformMessages<TApi extends Api>(
+  messages: Message[],
+  model: Model<TApi>,
+  normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
+): Message[] {
+  // Build a map of original tool call IDs to normalized IDs
+  const toolCallIdMap = new Map<string, string>();
+
+  // First pass: transform messages (thinking blocks, tool call ID normalization)
+  const transformed = messages.map((msg) => {
+    // User messages pass through unchanged
+    if (msg.role === "user") {
+      return msg;
+    }
+
+    // Handle toolResult messages - normalize toolCallId if we have a mapping
+    if (msg.role === "toolResult") {
+      const normalizedId = toolCallIdMap.get(msg.toolCallId);
+      if (normalizedId && normalizedId !== msg.toolCallId) {
+        return { ...msg, toolCallId: normalizedId };
+      }
+      return msg;
+    }
+
+    // Assistant messages need transformation check
+    if (msg.role === "assistant") {
+      const assistantMsg = msg as AssistantMessage;
+      const isSameModel =
+        assistantMsg.provider === model.provider &&
+        assistantMsg.api === model.api &&
+        assistantMsg.model === model.id;
+      // ... content transformation
+    }
+    return msg;
+  });
+  // ... second pass: orphan repair
+}`}
+  filename="packages/ai/src/providers/transform-messages.ts"
+  language="typescript"
+  startLine={8}
+  highlights={[
+    { line: 8, note: "泛型函数：TApi 约束目标 Provider 的 API 类型" },
+    { line: 11, note: "normalizeToolCallId 是可选的回调 — 每个 Provider 可以提供自己的 ID 转换逻辑" },
+    { line: 14, note: "toolCallIdMap 收集所有 ID 映射，在第二阶段统一应用到 toolResult" },
+    { line: 29, note: "isSameModel 判断：provider + api + model.id 三者都相同才算 '同模型'" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/transform-messages.ts#L8"
+/>
+
+### 阶段一：内容转换
+
+内容转换的核心是 thinking block 的处理。Pi 根据 `isSameModel` 判断采取不同策略：
+
+<SourceReader
+  client:visible
+  code={`const transformedContent = assistantMsg.content.flatMap((block) => {
+  if (block.type === "thinking") {
+    // Redacted thinking is opaque encrypted content, only valid for the same model.
+    // Drop it for cross-model to avoid API errors.
+    if (block.redacted) {
+      return isSameModel ? block : [];
+    }
+    // For same model: keep thinking blocks with signatures (needed for replay)
+    // even if the thinking text is empty (OpenAI encrypted reasoning)
+    if (isSameModel && block.thinkingSignature) return block;
+    // Skip empty thinking blocks, convert others to plain text
+    if (!block.thinking || block.thinking.trim() === "") return [];
+    if (isSameModel) return block;
+    return {
+      type: "text" as const,
+      text: block.thinking,
+    };
+  }
+  // ...
+});`}
+  filename="packages/ai/src/providers/transform-messages.ts"
+  language="typescript"
+  startLine={40}
+  highlights={[
+    { line: 43, note: "Redacted thinking: 加密内容，跨模型时必须丢弃（返回空数组 = flatMap 删除）" },
+    { line: 48, note: "thinkingSignature: OpenAI 的加密推理签名，同模型时保留用于 replay" },
+    { line: 50, note: "空 thinking block 直接丢弃 — 不给 LLM 发送无意义的空文本" },
+    { line: 52, note: "跨模型核心逻辑：thinking block → 普通 text block" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/transform-messages.ts#L40"
+/>
+
+这里的 `flatMap` 用法很精妙：返回空数组 `[]` 相当于删除元素，返回单个元素 `block` 相当于保留，返回转换后的对象相当于替换。一个 `flatMap` 同时实现了过滤、保留、转换三种操作。
+
+**Thinking block 转换规则表**：
+
+| 场景 | isSameModel | 有 redacted | 有 signature | 处理 |
+|------|:-----------:|:-----------:|:------------:|------|
+| 同模型 + 加密 | true | true | - | 保留原样 |
+| 跨模型 + 加密 | false | true | - | **丢弃**（不可解密） |
+| 同模型 + 签名 | true | - | true | 保留（replay 需要） |
+| 同模型 + 文本 | true | - | - | 保留 |
+| 跨模型 + 文本 | false | - | - | **转为 text block** |
+| 空内容 | - | - | - | **丢弃** |
+
+### 阶段二：ID 映射
+
+Tool call ID 的转换在第一阶段的 toolCall block 处理中完成：
+
+<SourceReader
+  client:visible
+  code={`if (block.type === "toolCall") {
+  const toolCall = block as ToolCall;
+  let normalizedToolCall: ToolCall = toolCall;
+
+  if (!isSameModel && toolCall.thoughtSignature) {
+    normalizedToolCall = { ...toolCall };
+    delete (normalizedToolCall as { thoughtSignature?: string }).thoughtSignature;
+  }
+
+  if (!isSameModel && normalizeToolCallId) {
+    const normalizedId = normalizeToolCallId(toolCall.id, model, assistantMsg);
+    if (normalizedId !== toolCall.id) {
+      toolCallIdMap.set(toolCall.id, normalizedId);
+      normalizedToolCall = { ...normalizedToolCall, id: normalizedId };
+    }
+  }
+
+  return normalizedToolCall;
+}`}
+  filename="packages/ai/src/providers/transform-messages.ts"
+  language="typescript"
+  startLine={67}
+  highlights={[
+    { line: 71, note: "thoughtSignature 是 OpenAI 特有的，跨模型时必须删除" },
+    { line: 76, note: "normalizeToolCallId 回调：每个 Provider 定义自己的 ID 转换规则" },
+    { line: 78, note: "记录映射关系 old→new，后续的 toolResult 会查这个 Map 来同步更新" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/transform-messages.ts#L67"
+/>
+
+ID 映射的关键是 **双向一致性**：tool_call 中的 ID 改了，对应的 tool_result 中的 toolCallId 也必须同步修改。`toolCallIdMap` 在第一阶段收集映射关系，然后在 toolResult 处理中查表应用。
+
+### 阶段三：孤儿修复
+
+第二遍扫描处理 "孤儿" 问题 —— tool_call 没有对应的 tool_result：
+
+<SourceReader
+  client:visible
+  code={`// Second pass: insert synthetic empty tool results for orphaned tool calls
+const result: Message[] = [];
+let pendingToolCalls: ToolCall[] = [];
+let existingToolResultIds = new Set<string>();
+
+for (let i = 0; i < transformed.length; i++) {
+  const msg = transformed[i];
+
+  if (msg.role === "assistant") {
+    // If we have pending orphaned tool calls from a previous assistant, insert synthetic results
+    if (pendingToolCalls.length > 0) {
+      for (const tc of pendingToolCalls) {
+        if (!existingToolResultIds.has(tc.id)) {
+          result.push({
+            role: "toolResult",
+            toolCallId: tc.id,
+            toolName: tc.name,
+            content: [{ type: "text", text: "No result provided" }],
+            isError: true,
+            timestamp: Date.now(),
+          } as ToolResultMessage);
+        }
+      }
+      pendingToolCalls = [];
+      existingToolResultIds = new Set();
+    }
+
+    // Skip errored/aborted assistant messages entirely.
+    const assistantMsg = msg as AssistantMessage;
+    if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
+      continue;
+    }
+
+    // Track tool calls from this assistant message
+    const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
+    if (toolCalls.length > 0) {
+      pendingToolCalls = toolCalls;
+      existingToolResultIds = new Set();
+    }
+
+    result.push(msg);
+  } else if (msg.role === "toolResult") {
+    existingToolResultIds.add(msg.toolCallId);
+    result.push(msg);
+  } else if (msg.role === "user") {
+    // User message interrupts tool flow - insert synthetic results for orphaned calls
+    if (pendingToolCalls.length > 0) {
+      for (const tc of pendingToolCalls) {
+        if (!existingToolResultIds.has(tc.id)) {
+          result.push({
+            role: "toolResult",
+            toolCallId: tc.id,
+            toolName: tc.name,
+            content: [{ type: "text", text: "No result provided" }],
+            isError: true,
+            timestamp: Date.now(),
+          } as ToolResultMessage);
+        }
+      }
+      pendingToolCalls = [];
+      existingToolResultIds = new Set();
+    }
+    result.push(msg);
+  }
+}`}
+  filename="packages/ai/src/providers/transform-messages.ts"
+  language="typescript"
+  startLine={98}
+  highlights={[
+    { line: 100, note: "pendingToolCalls 追踪当前 assistant message 中未匹配的 tool call" },
+    { line: 107, note: "孤儿检测：tool call ID 没有出现在 existingToolResultIds 中" },
+    { line: 112, note: "合成结果：isError=true + 'No result provided'，让 LLM 知道这个工具没执行" },
+    { line: 122, note: "error/aborted 的 assistant message 直接跳过 — 不重放不完整的轮次" },
+    { line: 136, note: "user 消息中断工具流 — 也需要补孤儿结果" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/transform-messages.ts#L98"
+/>
+
+孤儿修复解决了三个场景：
+
+1. **用户中途中断**（Ctrl+C）—— tool_call 发出但 execute 被中止
+2. **Provider 切换** —— 上一个 Provider 的 tool_call 在新 Provider 看来没有结果
+3. **错误/中止的 turn** —— `stopReason === "error"` 的 assistant message 被整体跳过
+
+合成的 `isError: true` 结果告诉 LLM "这个工具没有执行"，让 LLM 可以选择重试或换一种方式。
+
+---
+
+## 5.4 Thinking 统一
+
+### 问题：每个 Provider 说不同的 "方言"
+
+LLM 的 "Thinking"（也叫 Reasoning、Chain of Thought）功能在不同 Provider 中有完全不同的参数名和值域：
+
+- **Anthropic**: `thinking.budget_tokens` — 数值型，1024~128K
+- **OpenAI**: `reasoning_effort` — 枚举型，`"low" | "medium" | "high"`
+- **Google**: `thinking_config.thinking_budget` — 数值型，自定义范围
+- **Bedrock**: 继承 Anthropic 格式，但通过 Converse API 传递
+- **Mistral**: 不支持 thinking（截至当前版本）
+
+用户不应该关心这些差异。Pi 定义了统一的 `ThinkingLevel` 枚举：
+
+```typescript
+type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+```
+
+### 映射矩阵
+
+6 个级别 × 5 个 Provider 的完整映射关系：
+
+| ThinkingLevel | Anthropic | OpenAI | Google | Bedrock | Mistral |
+|:----------:|:---------:|:------:|:------:|:-------:|:-------:|
+| `off` | `disabled` | — | `include_thoughts: false` | `disabled` | — |
+| `minimal` | `budget: 1024` | `effort: "low"` | `budget: 1024` | `budget: 1024` | — |
+| `low` | `budget: 2048` | `effort: "low"` | `budget: 2048` | `budget: 2048` | — |
+| `medium` | `budget: 4096` | `effort: "medium"` | `budget: 4096` | `budget: 4096` | — |
+| `high` | `budget: 8192` | `effort: "high"` | `budget: 8192` | `budget: 8192` | — |
+| `xhigh` | `budget: 16384` | `effort: "high"` | `budget: 16384` | `budget: 16384` | — |
+
+### Budget vs Adaptive
+
+两种 Thinking 模式的核心区别：
+
+**Budget 模式**（Anthropic、Google）：
+
+```typescript
+// 你指定一个 token 预算，LLM 在预算内自由思考
+{ thinking: { type: "enabled", budget_tokens: 8192 } }
+```
+
+- 优点：可预测的成本和延迟
+- 缺点：预算不够时推理可能被截断
+
+**Adaptive 模式**（OpenAI）：
+
+```typescript
+// 你指定一个 "努力程度"，LLM 自行决定思考多少
+{ reasoning_effort: "high" }
+```
+
+- 优点：LLM 根据任务复杂度自适应
+- 缺点：成本和延迟不可预测
+
+Pi 的 `ThinkingLevel` 通过映射表抹平了这个差异。用户只需设置 `thinking: "high"`，Pi 自动为 Anthropic 设置 `budget: 8192`，为 OpenAI 设置 `effort: "high"`。映射不完美（adaptive 和 budget 本质上是不同的概念），但在实践中足够好。
+
+### Thinking Block 的跨 Provider 传递
+
+回忆 5.3 的 thinking 转换规则。这里补充一个重要的技术细节 —— **thinkingSignature 的作用**：
+
+```
+场景：用户在 OpenAI o1 上进行了一轮对话，然后切换到 Claude
+
+OpenAI 的 assistant message 包含：
+  { type: "thinking", thinking: "", thinkingSignature: "eyJ..." }
+  ← thinking 文本为空（OpenAI 加密了推理过程）
+  ← thinkingSignature 是不透明签名（后续请求需要携带）
+
+转换规则：
+  同模型（o1 → o1）：保留整个 block（包括空 thinking + signature）
+  跨模型（o1 → Claude）：丢弃（空 thinking 没有可用信息，signature 无法解密）
+```
+
+---
+
+## 5.5 Token 计费与溢出检测
+
+### 计费公式
+
+Pi 为每个模型维护一个成本表，计费公式是标准的 per-million-token 计算：
+
+```typescript
+// 标准计费公式
+const inputCost  = (inputTokens  / 1_000_000) * model.inputCostPerMillion;
+const outputCost = (outputTokens / 1_000_000) * model.outputCostPerMillion;
+const totalCost  = inputCost + outputCost;
+
+// 特殊情况：Thinking tokens 按 output 计费
+// Anthropic：thinking_tokens 在 usage.output_tokens 中
+// OpenAI：reasoning_tokens 在 usage.completion_tokens_details 中
+```
+
+注意 Thinking tokens 的计费方式 —— 它们按 output token 价格计费，但数量可能是实际 output 的 5~10 倍。一个 `thinking: "high"` 的请求可能产生 8K thinking tokens + 500 output tokens，实际输出只有 500 tokens，但计费按 8500 output tokens 算。
+
+### 溢出检测
+
+Pi 需要检测和处理 40+ 种 token 溢出场景。核心问题是：**模型对 context window 溢出的反应完全不统一**。
+
+| Provider | 溢出行为 | Pi 的处理 |
+|----------|----------|-----------|
+| Anthropic | 返回 400 错误 `"messages: max tokens exceeded"` | 截断最早的消息 |
+| OpenAI | 返回 400 错误 `"maximum context length"` | 截断最早的消息 |
+| Google | 返回 400 错误或静默截断 | 检查 usage 中的 `prompt_token_count` |
+| z.ai | **静默溢出** — 不报错，但响应质量下降 | 预计算 token 数，主动截断 |
+| Ollama | **静默截断** — 自动丢弃超出的消息，不报错 | 预计算 token 数，发出警告 |
+
+**z.ai 的静默溢出**是最危险的情况。它不返回错误，也不截断消息，但当 context 超过 window 时，模型的响应质量急剧下降（类似于 "注意力稀释"）。用户可能发现 Agent 突然 "变笨了"，但不知道原因。
+
+**Ollama 的静默截断**同样危险。Ollama 自动丢弃超出 context window 的早期消息，不发出任何警告。用户可能以为 Agent "忘记了" 之前的指令，实际上是消息被截断了。
+
+Pi 的解决方案是 **预计算 + 主动截断**：在发送请求前估算 token 数，如果超过 context window 的 80%，主动使用摘要策略压缩早期消息。
+
+---
+
+## 5.6 生产环境必备
+
+### Unicode 代理对清理
+
+生产环境中 Agent 会处理各种外部数据 —— 网页抓取、数据库记录、用户粘贴的文本。这些数据中可能包含 **未配对的 Unicode 代理对**（unpaired surrogates），导致 `JSON.stringify()` 生成无效 JSON，进而让 API 请求失败。
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Removes unpaired Unicode surrogate characters from a string.
+ *
+ * Unpaired surrogates (high surrogates 0xD800-0xDBFF without matching low surrogates 0xDC00-0xDFFF,
+ * or vice versa) cause JSON serialization errors in many API providers.
+ *
+ * Valid emoji and other characters outside the Basic Multilingual Plane use properly paired
+ * surrogates and will NOT be affected by this function.
+ *
+ * @param text - The text to sanitize
+ * @returns The sanitized text with unpaired surrogates removed
+ */
+export function sanitizeSurrogates(text: string): string {
+  // Replace unpaired high surrogates (0xD800-0xDBFF not followed by low surrogate)
+  // Replace unpaired low surrogates (0xDC00-0xDFFF not preceded by high surrogate)
+  return text.replace(/[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]/g, "");
+}`}
+  filename="packages/ai/src/utils/sanitize-unicode.ts"
+  language="typescript"
+  startLine={1}
+  highlights={[
+    { line: 5, note: "高代理对 0xD800-0xDBFF 后面必须紧跟低代理对 0xDC00-0xDFFF，否则就是 unpaired" },
+    { line: 8, note: "正常的 emoji（如 U+1F600）使用配对的代理对，不会被影响" },
+    { line: 16, note: "正则解析：(?!...) 负前瞻 + (?<!...) 负后瞻，只匹配未配对的代理字符" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/utils/sanitize-unicode.ts#L1"
+/>
+
+正则表达式拆解：
+
+```
+/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g
+  ↑ 高代理对          ↑ 后面没有低代理对 → 匹配（删除）
+
+/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+  ↑ 前面没有高代理对    ↑ 低代理对 → 匹配（删除）
+```
+
+关键是 **不破坏正常的 emoji**。`"Hello 🙈 World"` 中的猴子 emoji 是 `\uD83D\uDE48`（配对的代理对），会被正则安全地跳过。
+
+### CSP-safe 降级
+
+Pi 需要在多种宿主环境中运行：CLI、VS Code 扩展、Web 应用。不同环境有不同的 Content Security Policy (CSP) 限制：
+
+```typescript
+// VS Code Webview 中 eval() 被 CSP 禁止
+// 某些动态特性需要降级处理
+try {
+  // 尝试使用 Function() 构造函数（需要 CSP 允许 unsafe-eval）
+  const fn = new Function("return 42");
+  fn();
+} catch {
+  // 降级到静态实现
+  fallbackStaticImplementation();
+}
+```
+
+Pi 的做法是 **先尝试最高效的方式，catch 后降级**。这样在允许 eval 的环境中获得最佳性能，在 CSP 限制的环境中自动降级。
+
+### OAuth PKCE 完整流程
+
+对于 Anthropic 的 OAuth 认证（不使用 API Key 的场景），Pi 实现了完整的 PKCE (Proof Key for Code Exchange) 流程：
+
+```
+┌─────────┐    1. 生成 code_verifier + code_challenge    ┌──────────┐
+│         │ ──────────────────────────────────────────────→│          │
+│  CLI    │    2. 打开浏览器：auth_url?code_challenge=... │  Auth    │
+│  App    │ ──────────────────────────────────────────────→│  Server  │
+│         │                                               │          │
+│         │    3. 用户在浏览器中授权                        │          │
+│         │                                               │          │
+│         │    4. 重定向到 localhost:PORT?code=AUTH_CODE    │          │
+│         │ ←──────────────────────────────────────────── │          │
+│         │                                               │          │
+│         │    5. POST /token { code, code_verifier }     │          │
+│         │ ──────────────────────────────────────────────→│          │
+│         │                                               │          │
+│         │    6. { access_token, refresh_token }          │          │
+│         │ ←──────────────────────────────────────────── │          │
+└─────────┘                                               └──────────┘
+```
+
+PKCE 的核心思想是：CLI 生成一个随机的 `code_verifier`，将其 SHA-256 哈希作为 `code_challenge` 发送给 Auth Server。Token 交换时发送原始的 `code_verifier`，Server 验证 `sha256(verifier) === challenge`。这样即使 authorization code 被截获，没有 verifier 也无法完成 token 交换。
+
+### GitHub Copilot Headers
+
+当 Pi 作为 GitHub Copilot 的后端运行时，需要携带特定的 HTTP headers：
+
+```typescript
+const copilotHeaders = {
+  "X-GitHub-Api-Version": "2024-12-15",
+  "Copilot-Integration-Id": "pi-agent",
+  "Editor-Version": `vscode/${vscodeVersion}`,
+  "Editor-Plugin-Version": `pi/${piVersion}`,
+};
+```
+
+这些 headers 不仅用于认证，还影响 GitHub 的限流策略和 feature flag。缺少 `Editor-Version` 可能导致请求被限流。
+
+### models.generated.ts：13,899 行自动生成
+
+Pi 维护了一个自动生成的模型配置文件 `models.generated.ts`，包含所有已知模型的元数据：
+
+```typescript
+// 自动生成文件 — 不要手动编辑
+// 来源：各 Provider 的 API 定价页面 + 模型公告
+export const MODELS = {
+  "claude-sonnet-4-5-20250514": {
+    api: "anthropic",
+    provider: "anthropic",
+    contextWindow: 200_000,
+    maxOutputTokens: 64_000,
+    inputCostPerMillion: 3.0,
+    outputCostPerMillion: 15.0,
+    supportsThinking: true,
+    supportsVision: true,
+    supportsTools: true,
+  },
+  // ... 300+ 模型定义
+};
+```
+
+这个文件由 CI 脚本自动生成，每周更新一次。手动维护 300+ 模型的配置是不现实的，自动化是唯一的选择。
+
+### 自定义模型 Compat 矩阵
+
+当用户配置自定义模型（Ollama、Together AI 等）时，Pi 需要知道该模型支持哪些特性：
+
+```typescript
+interface ModelCapabilities {
+  thinking: boolean;     // 是否支持 thinking/reasoning
+  tools: boolean;        // 是否支持 function calling
+  vision: boolean;       // 是否支持图片输入
+  streaming: boolean;    // 是否支持流式输出
+  json_mode: boolean;    // 是否支持 JSON 结构化输出
+}
+```
+
+Pi 使用 "compat 矩阵" 来处理特性不支持的情况：
+
+| 特性 | 不支持时的降级策略 |
+|------|-------------------|
+| thinking | 跳过 thinking 参数，使用标准推理 |
+| tools | 将工具定义注入 system prompt，解析文本输出模拟工具调用 |
+| vision | 将图片转为文字描述（使用支持 vision 的模型做预处理） |
+| streaming | 使用非流式 API，整体返回后模拟流式事件 |
+| json_mode | 在 prompt 中要求 JSON 格式，解析时容错处理 |
+
+### Config Value 动态解析
+
+Pi 的配置值支持动态解析，允许在配置文件中引用环境变量或命令输出：
+
+```typescript
+// 配置文件中的三种值类型：
+
+// 1. 字面值
+"apiKey": "sk-ant-api03-abc123..."
+
+// 2. 环境变量引用
+"apiKey": "env:ANTHROPIC_API_KEY"
+// 运行时解析为 process.env.ANTHROPIC_API_KEY
+
+// 3. 命令输出引用
+"apiKey": "!security find-generic-password -s 'anthropic' -w"
+// 运行时执行命令并使用其 stdout 作为值
+```
+
+`"!command"` 语法特别强大，可以从 macOS Keychain、1Password CLI、HashiCorp Vault 等密钥管理系统中安全获取 API Key，避免将密钥明文存储在配置文件中。
+
+解析逻辑：
+
+```typescript
+async function resolveConfigValue(value: string): Promise<string> {
+  // env: 前缀 → 读取环境变量
+  if (value.startsWith("env:")) {
+    const envVar = value.slice(4);
+    return process.env[envVar] ?? "";
+  }
+
+  // ! 前缀 → 执行命令
+  if (value.startsWith("!")) {
+    const command = value.slice(1);
+    const { stdout } = await exec(command);
+    return stdout.trim();
+  }
+
+  // 其他 → 字面值
+  return value;
+}
+```
+
+---
+
+## 5.7 动手：实现多模型统一
+
+现在到你动手的时候了。在 `demos/05-multi-model/` 目录中有 8 个渐进式练习：
+
+### 练习 01：Provider Adapter
+
+```
+demos/05-multi-model/src/01-provider-adapter.ts
+```
+
+实现一个 Anthropic 适配器，将 Anthropic 的流式事件映射为统一的 `UnifiedStreamEvent`：
+
+```typescript
+export type UnifiedStreamEvent =
+  | { type: "text_delta"; delta: string }
+  | { type: "tool_call"; name: string; args: Record<string, unknown> }
+  | { type: "done"; text: string; usage: { inputTokens: number; outputTokens: number } };
+```
+
+核心体验：不管底层 Provider 的事件格式多复杂，上层消费者只看到三种事件类型。
+
+### 练习 02：Provider Registry
+
+```
+demos/05-multi-model/src/02-unified-api.ts
+```
+
+实现 `ProviderRegistry`，用一个 Map 分发请求到正确的适配器：
+
+```typescript
+class ProviderRegistry {
+  private providers = new Map<string, StreamFn>();
+  register(name: string, streamFn: StreamFn): void { /* ... */ }
+  async *stream(provider: string, model: string, messages: StreamConfig["messages"]): AsyncIterable<UnifiedStreamEvent> { /* ... */ }
+}
+```
+
+### 练习 03：跨 Provider 消息转换
+
+```
+demos/05-multi-model/src/03-cross-provider.ts
+```
+
+实现三个转换函数：`normalizeToolId()`、`convertThinkingBlock()`、`fixOrphanedToolCalls()`，然后组合成完整的 `transformMessages()` 管道。
+
+### 练习 04：Thinking Level 统一
+
+```
+demos/05-multi-model/src/04-thinking-unify.ts
+```
+
+实现统一的 `getThinkingConfig(level, provider)` 函数，将 6 级 ThinkingLevel 映射到各 Provider 的原生参数。
+
+### 练习 05：Token 计费
+
+```
+demos/05-multi-model/src/05-cost-tracking.ts
+```
+
+实现 `calculateCost()` 和 `CostTracker`，支持多模型混合对话的累计成本统计。
+
+### 练习 06：Unicode 清理
+
+```
+demos/05-multi-model/src/06-unicode-sanitize.ts
+```
+
+实现 `sanitizeUnicode()` 函数，正确处理未配对的 Unicode 代理对，同时保留正常的 emoji。
+
+### 练习 07：OAuth PKCE
+
+```
+demos/05-multi-model/src/07-oauth-flow.ts
+```
+
+实现 PKCE 的密码学基础：`generateCodeVerifier()` 和 `generateCodeChallenge()`。
+
+### 练习 08：自定义模型配置
+
+```
+demos/05-multi-model/src/08-custom-model.ts
+```
+
+从 JSON 配置加载自定义模型，注册到 Provider Registry，通过统一接口调用。
+
+### Pi 的 Provider 注册 vs 我们的简化版
+
+<CodeComparison
+  client:visible
+  left={{
+    label: "Pi 的 ApiProvider",
+    language: "typescript",
+    code: `// Pi: 类型安全的泛型注册
+interface ApiProvider<TApi extends Api, TOptions extends StreamOptions> {
+  api: TApi;
+  stream: StreamFunction<TApi, TOptions>;
+  streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
+}
+
+// 注册时类型检查
+registerApiProvider({
+  api: "anthropic",
+  stream: streamAnthropic,
+  streamSimple: streamAnthropicSimple,
+}, "oauth-session-123");
+
+// wrapStream 运行时守卫
+if (model.api !== api) {
+  throw new Error("Mismatched api");
+}
+
+// 按 sourceId 批量卸载
+unregisterApiProviders("oauth-session-123");`
+  }}
+  right={{
+    label: "简化版 Registry",
+    language: "typescript",
+    code: `// 简化：字符串类型，单一 stream
+class ProviderRegistry {
+  private providers = new Map<string, StreamFn>();
+
+  register(name: string, streamFn: StreamFn) {
+    this.providers.set(name, streamFn);
+  }
+
+  async *stream(provider: string, model: string, messages) {
+    const fn = this.providers.get(provider);
+    if (!fn) throw new Error("Unknown provider");
+    yield* fn({ model, messages });
+  }
+}
+
+// 没有 streamSimple
+// 没有 sourceId 卸载
+// 没有运行时类型守卫
+// 没有泛型约束`
+  }}
+/>
+
+简化版足够理解注册-分发模式，但 Pi 的设计多了三个维度：泛型类型安全、stream/streamSimple 分离、sourceId 生命周期管理。
+
+---
+
+## 5.8 本章小结
+
+### 核心要点
+
+1. **Model → Api → Provider 三层抽象** —— Model 是用户选的模型名，Api 是协议标识，Provider 是流式实现。三层分离让同一个 Provider 可以支持多种 Api（如 Bedrock 支持 Anthropic 和 Meta 模型），也让同一种 Api 可以有多种 Provider（如 Anthropic API 通过直连或 Bedrock 访问）
+
+2. **StreamFunction 绝不 throw** —— 所有错误通过事件流传递，确保 `for await...of` 消费者永远能正常退出。这是多 Provider 统一的基础契约
+
+3. **transformMessages 三阶段管道** —— 内容转换（thinking → text）、ID 映射（tool call ID 归一化）、孤儿修复（补合成 tool result）。这三步解决了 90% 的跨 Provider 消息兼容性问题
+
+4. **Thinking 统一是不完美的** —— Budget 和 Adaptive 是本质不同的概念，映射表只是 "足够好" 的近似。生产系统需要接受这种不完美
+
+5. **生产环境的长尾问题** —— Unicode 清理、CSP 降级、OAuth PKCE、静默溢出检测... 这些 "小" 问题的累积处理工作量远超核心逻辑
+
+### 架构关系图
+
+```
+用户选择: "claude-sonnet-4-5-20250514"
+  │
+  ├── Model 解析: { id: "claude-sonnet-4-5-20250514", api: "anthropic", provider: "anthropic" }
+  │
+  ├── Provider 查找: apiProviderRegistry.get("anthropic")
+  │
+  ├── 消息转换: transformMessages(messages, model, normalizeToolCallId)
+  │     ├── Phase 1: thinking → text, signature 清理
+  │     ├── Phase 2: tool call ID 归一化
+  │     └── Phase 3: 孤儿 tool call 补合成结果
+  │
+  ├── Thinking 映射: getThinkingConfig("high", "anthropic")
+  │     └── → { thinking: { type: "enabled", budget_tokens: 8192 } }
+  │
+  ├── Unicode 清理: sanitizeSurrogates(toolResultContent)
+  │
+  ├── 流式调用: provider.stream(model, context, options)
+  │     └── → AssistantMessageEventStream（绝不 throw）
+  │
+  └── 计费: calculateCost(model, usage)
+        └── → { inputCost, outputCost, totalCost }
+```
+
+### 下一章预告
+
+下一章我们将进入 **构建你的 Agent** —— 把前五章学到的所有概念组合起来，从零实现一个具备多模型支持、工具系统、流式输出的完整 coding agent。那将是理论转化为实践的终章。
