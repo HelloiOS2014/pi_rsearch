@@ -1,0 +1,1327 @@
+---
+title: "核心循环"
+chapter: 2
+description: "逐行理解 Pi 的 Agent Loop，理解双层循环和状态机，自己实现 mini agent loop"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+import VideoEmbed from '../../components/tutorial/VideoEmbed';
+
+# 核心循环
+
+本章目标：深入 Pi 的核心 — `agent-loop.ts`，理解双层循环的设计，掌握 Steering 和 Follow-up 机制，最终用 6 个递进的 demo 从零实现一个 mini agent loop。
+
+这是整个教程最重要的一章。上一章我们看到"Agent 的本质是一个 while 循环"，但从 30 行 demo 到生产级框架，中间还有巨大的鸿沟。Pi 用约 616 行代码把这个鸿沟填满，而且填得非常优雅。
+
+---
+
+## 2.1 agent-loop.ts 源码精读
+
+`agent-loop.ts` 是 Pi 的心脏。整个文件 617 行，实现了完整的 Agent Loop。我们先看它的整体结构，再逐层深入。
+
+### 入口：agentLoop()
+
+一切从 `agentLoop()` 函数开始。它是一个纯函数：输入 prompt + context + config，返回一个事件流。
+
+<SourceReader
+  client:visible
+  code={`export function agentLoop(
+  prompts: AgentMessage[],
+  context: AgentContext,
+  config: AgentLoopConfig,
+  signal?: AbortSignal,
+  streamFn?: StreamFn,
+): EventStream<AgentEvent, AgentMessage[]> {
+  const stream = createAgentStream();
+
+  void runAgentLoop(
+    prompts, context, config,
+    async (event) => { stream.push(event); },
+    signal, streamFn,
+  ).then((messages) => { stream.end(messages); });
+
+  return stream;
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={31}
+  highlights={[
+    { line: 31, note: "agentLoop 是纯函数入口：不持有状态，不修改外部变量" },
+    { line: 38, note: "返回 EventStream — 调用者通过 for-await-of 消费事件" },
+    { line: 40, note: "void + .then：runAgentLoop 是异步运行的，事件通过 stream.push 逐个推送" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts#L31"
+/>
+
+注意这里的设计模式：`agentLoop()` 立即返回一个 `EventStream`，而 `runAgentLoop` 在后台异步执行。这样调用者可以立即开始 `for await` 消费事件，不需要等整个循环跑完。
+
+### runAgentLoop：启动阶段
+
+`runAgentLoop` 负责初始化上下文，发射启动事件，然后把控制权交给 `runLoop`：
+
+<SourceReader
+  client:visible
+  code={`export async function runAgentLoop(
+  prompts: AgentMessage[],
+  context: AgentContext,
+  config: AgentLoopConfig,
+  emit: AgentEventSink,
+  signal?: AbortSignal,
+  streamFn?: StreamFn,
+): Promise<AgentMessage[]> {
+  const newMessages: AgentMessage[] = [...prompts];
+  const currentContext: AgentContext = {
+    ...context,
+    messages: [...context.messages, ...prompts],
+  };
+
+  await emit({ type: "agent_start" });
+  await emit({ type: "turn_start" });
+  for (const prompt of prompts) {
+    await emit({ type: "message_start", message: prompt });
+    await emit({ type: "message_end", message: prompt });
+  }
+
+  await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+  return newMessages;
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={95}
+  highlights={[
+    { line: 103, note: "newMessages 收集本次运行产生的所有新消息 — 最终通过 agent_end 事件返回" },
+    { line: 104, note: "浅拷贝 context.messages — 不修改调用者传入的原始数组" },
+    { line: 109, note: "emit 是 async 的 — 保证事件按顺序到达订阅者" },
+    { line: 116, note: "runLoop 是真正的核心循环，下面详细分析" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts#L95"
+/>
+
+关键设计：`newMessages` 和 `currentContext.messages` 是两个独立的数组。`currentContext.messages` 包含完整的历史上下文（传给 LLM），`newMessages` 只包含本次新增的消息（返回给调用者）。两者的消息会同步 push，但 `newMessages` 不包含历史消息。
+
+### runLoop：双层循环的核心
+
+这是整个 Pi 最关键的函数。30 行代码，双层 while 循环，实现了 Steering（中断注入）和 Follow-up（续命）两种机制：
+
+<SourceReader
+  client:visible
+  code={`async function runLoop(
+  currentContext: AgentContext,
+  newMessages: AgentMessage[],
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+  streamFn?: StreamFn,
+): Promise<void> {
+  let firstTurn = true;
+  // Check for steering messages at start (user may have typed while waiting)
+  let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+
+  // Outer loop: continues when queued follow-up messages arrive after agent would stop
+  while (true) {
+    let hasMoreToolCalls = true;
+
+    // Inner loop: process tool calls and steering messages
+    while (hasMoreToolCalls || pendingMessages.length > 0) {
+      if (!firstTurn) {
+        await emit({ type: "turn_start" });
+      } else {
+        firstTurn = false;
+      }
+
+      // Process pending messages (inject before next assistant response)
+      if (pendingMessages.length > 0) {
+        for (const message of pendingMessages) {
+          await emit({ type: "message_start", message });
+          await emit({ type: "message_end", message });
+          currentContext.messages.push(message);
+          newMessages.push(message);
+        }
+        pendingMessages = [];
+      }
+
+      // Stream assistant response
+      const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+      newMessages.push(message);
+
+      if (message.stopReason === "error" || message.stopReason === "aborted") {
+        await emit({ type: "turn_end", message, toolResults: [] });
+        await emit({ type: "agent_end", messages: newMessages });
+        return;
+      }
+
+      // Check for tool calls
+      const toolCalls = message.content.filter((c) => c.type === "toolCall");
+      hasMoreToolCalls = toolCalls.length > 0;
+
+      const toolResults: ToolResultMessage[] = [];
+      if (hasMoreToolCalls) {
+        toolResults.push(...(await executeToolCalls(currentContext, message, config, signal, emit)));
+
+        for (const result of toolResults) {
+          currentContext.messages.push(result);
+          newMessages.push(result);
+        }
+      }
+
+      await emit({ type: "turn_end", message, toolResults });
+
+      pendingMessages = (await config.getSteeringMessages?.()) || [];
+    }
+
+    // Agent would stop here. Check for follow-up messages.
+    const followUpMessages = (await config.getFollowUpMessages?.()) || [];
+    if (followUpMessages.length > 0) {
+      // Set as pending so inner loop processes them
+      pendingMessages = followUpMessages;
+      continue;
+    }
+
+    // No more messages, exit
+    break;
+  }
+
+  await emit({ type: "agent_end", messages: newMessages });
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={155}
+  highlights={[
+    { line: 165, note: "启动时就检查 steering — 用户可能在等待期间就输入了新指令" },
+    { line: 168, note: "外层 while(true)：follow-up 循环 — Agent 要停时检查是否有后续消息" },
+    { line: 172, note: "内层 while：tool call + steering 循环 — 只要有工具调用或 steering 消息就继续" },
+    { line: 191, note: "streamAssistantResponse：调用 LLM，返回 AssistantMessage" },
+    { line: 194, note: "error 或 aborted 时立即退出整个循环，不再处理任何消息" },
+    { line: 206, note: "executeToolCalls 支持 sequential 和 parallel 两种模式" },
+    { line: 214, note: "每轮结束后检查 steering 队列 — 这是 steering 的注入点" },
+    { line: 218, note: "内层循环结束后检查 follow-up — 这是 follow-up 的注入点" },
+    { line: 221, note: "follow-up 消息变成 pendingMessages，重新进入内层循环" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts#L155"
+/>
+
+### 双层循环伪代码
+
+用伪代码重新理解这个结构：
+
+```
+函数 runLoop():
+    pendingMessages = 检查初始 steering 队列
+
+    # ═══ 外层循环：follow-up 驱动 ═══
+    while true:
+        hasMoreToolCalls = true
+
+        # ─── 内层循环：tool call + steering 驱动 ───
+        while hasMoreToolCalls 或 有 pendingMessages:
+            如果有 pendingMessages:
+                将它们注入到上下文中
+
+            assistantMessage = 调用 LLM(上下文)
+
+            如果出错或被中止:
+                发射 agent_end，返回
+
+            toolCalls = 从 assistantMessage 中提取工具调用
+            hasMoreToolCalls = toolCalls 不为空
+
+            如果有 toolCalls:
+                执行所有工具，结果加入上下文
+
+            pendingMessages = 检查 steering 队列  ← steering 注入点
+        # ─── 内层循环结束 ───
+
+        followUp = 检查 follow-up 队列  ← follow-up 注入点
+        如果有 followUp:
+            pendingMessages = followUp
+            continue  ← 重新进入内层循环
+        否则:
+            break  ← 真正结束
+
+    发射 agent_end
+```
+
+<VideoEmbed
+  client:visible
+  title="Agent Loop 双层循环动画"
+  description="可视化 Inner Loop（tool calls + steering）和 Outer Loop（follow-up）的运行流程"
+  duration="~45s"
+  compositionId="V04-LoopAnimation"
+/>
+
+### Steering vs Follow-up：两种"插话"机制
+
+理解这两种机制是理解 Pi Agent Loop 的关键：
+
+| | Steering（中断） | Follow-up（续命） |
+|---|---|---|
+| **时机** | 内层循环每轮结束后 | 外层循环，Agent 准备停止时 |
+| **语义** | "等等，我还有补充" | "你做完了？我还有新任务" |
+| **效果** | 在下一次 LLM 调用前注入消息 | 把 Agent 从"准备停止"拉回来继续运行 |
+| **典型场景** | 用户在 Agent 执行工具时输入新指令 | Agent 完成一个任务后，用户追加新任务 |
+| **Pi 默认模式** | one-at-a-time | one-at-a-time |
+
+### streamAssistantResponse：LLM 调用边界
+
+这个函数是 AgentMessage 世界和 LLM Message 世界之间的桥梁：
+
+<SourceReader
+  client:visible
+  code={`async function streamAssistantResponse(
+  context: AgentContext,
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+  streamFn?: StreamFn,
+): Promise<AssistantMessage> {
+  // Apply context transform if configured (AgentMessage[] → AgentMessage[])
+  let messages = context.messages;
+  if (config.transformContext) {
+    messages = await config.transformContext(messages, signal);
+  }
+
+  // Convert to LLM-compatible messages (AgentMessage[] → Message[])
+  const llmMessages = await config.convertToLlm(messages);
+
+  // Build LLM context
+  const llmContext: Context = {
+    systemPrompt: context.systemPrompt,
+    messages: llmMessages,
+    tools: context.tools,
+  };
+
+  const streamFunction = streamFn || streamSimple;
+  // ... resolve API key, call LLM ...
+  const response = await streamFunction(config.model, llmContext, {
+    ...config,
+    apiKey: resolvedApiKey,
+    signal,
+  });
+
+  let partialMessage: AssistantMessage | null = null;
+  let addedPartial = false;
+
+  for await (const event of response) {
+    switch (event.type) {
+      case "start":
+        partialMessage = event.partial;
+        context.messages.push(partialMessage);
+        addedPartial = true;
+        await emit({ type: "message_start", message: { ...partialMessage } });
+        break;
+
+      case "text_start":
+      case "text_delta":
+      // ... other streaming events ...
+        if (partialMessage) {
+          partialMessage = event.partial;
+          context.messages[context.messages.length - 1] = partialMessage;
+          await emit({
+            type: "message_update",
+            assistantMessageEvent: event,
+            message: { ...partialMessage },
+          });
+        }
+        break;
+
+      case "done":
+      case "error": {
+        const finalMessage = await response.result();
+        if (addedPartial) {
+          context.messages[context.messages.length - 1] = finalMessage;
+        } else {
+          context.messages.push(finalMessage);
+        }
+        await emit({ type: "message_end", message: finalMessage });
+        return finalMessage;
+      }
+    }
+  }
+  // ...
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={238}
+  highlights={[
+    { line: 247, note: "transformContext：在 AgentMessage 层面做上下文裁剪（如 token 超限时删旧消息）" },
+    { line: 251, note: "convertToLlm：AgentMessage[] → Message[] 的转换边界。自定义消息类型在这里被过滤或转换" },
+    { line: 280, note: "streaming 期间 partialMessage 不断被替换，context.messages 的最后一条始终是最新的 partial" },
+    { line: 289, note: "done/error 时取最终结果，替换掉 context.messages 中的 partial 版本" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts#L238"
+/>
+
+关键设计：**两层转换管道**。
+
+1. `transformContext`：`AgentMessage[] → AgentMessage[]` — 在 Agent 消息层面做变换（裁剪、注入外部上下文）
+2. `convertToLlm`：`AgentMessage[] → Message[]` — 转换为 LLM 能理解的标准消息格式
+
+这个设计让 Agent 可以拥有 LLM 不需要知道的自定义消息类型（比如 UI 通知、状态提示），只在调用 LLM 时才转换为标准格式。
+
+### executeToolCalls：工具执行
+
+工具执行支持两种模式 — sequential 和 parallel：
+
+<SourceReader
+  client:visible
+  code={`async function executeToolCalls(
+  currentContext: AgentContext,
+  assistantMessage: AssistantMessage,
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+): Promise<ToolResultMessage[]> {
+  const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+  if (config.toolExecution === "sequential") {
+    return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
+  }
+  return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={336}
+  highlights={[
+    { line: 344, note: "默认是 parallel 模式 — 多个工具调用可以并发执行" },
+    { line: 345, note: "sequential：一个接一个执行。parallel：先 prepare 全部，再并发 execute" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts#L336"
+/>
+
+工具执行分三个阶段，每个阶段都有 hook 点：
+
+```
+prepareToolCall() → executePreparedToolCall() → finalizeExecutedToolCall()
+      ↑                                              ↑
+  beforeToolCall hook                            afterToolCall hook
+  可以 block 工具                                可以修改工具结果
+```
+
+**parallel 模式的细节**：prepare 阶段是 sequential 的（因为 `beforeToolCall` 可能有副作用），execute 阶段是并发的（`Promise.all` 语义），finalize 阶段按照 assistant message 中的原始顺序逐个处理。这保证了事件发射顺序的确定性。
+
+---
+
+## 2.2 Agent 类源码精读
+
+`agent-loop.ts` 是无状态的纯函数层。`Agent` 类在它之上封装了状态管理、事件广播、队列管理等高层功能。
+
+### Agent 状态机
+
+Agent 类的核心是一个简单的状态机：`IDLE → STREAMING → IDLE`。
+
+<SourceReader
+  client:visible
+  code={`export class Agent {
+  private _state: AgentState = {
+    systemPrompt: "",
+    model: getModel("google", "gemini-2.5-flash-lite-preview-06-17"),
+    thinkingLevel: "off",
+    tools: [],
+    messages: [],
+    isStreaming: false,
+    streamMessage: null,
+    pendingToolCalls: new Set<string>(),
+    error: undefined,
+  };
+
+  private listeners = new Set<(e: AgentEvent) => void>();
+  private abortController?: AbortController;
+  private convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+  private transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+  private steeringQueue: AgentMessage[] = [];
+  private followUpQueue: AgentMessage[] = [];
+  private steeringMode: "all" | "one-at-a-time";
+  private followUpMode: "all" | "one-at-a-time";
+  // ...
+}`}
+  filename="packages/agent/src/agent.ts"
+  language="typescript"
+  startLine={116}
+  highlights={[
+    { line: 117, note: "AgentState 是一个扁平对象 — 没有嵌套状态机，简单直接" },
+    { line: 123, note: "isStreaming：唯一的状态标记。true 时调 prompt() 会抛错" },
+    { line: 125, note: "pendingToolCalls：当前正在执行的工具 ID 集合，用于 UI 显示进度" },
+    { line: 129, note: "listeners：观察者模式 — UI 通过 subscribe() 订阅 AgentEvent" },
+    { line: 133, note: "两个队列：steering 用于中途注入，followUp 用于续命" },
+    { line: 135, note: "队列模式：all = 一次全部取出，one-at-a-time = 每次只取一条" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent.ts#L116"
+/>
+
+### constructor：默认配置
+
+<SourceReader
+  client:visible
+  code={`constructor(opts: AgentOptions = {}) {
+  this._state = { ...this._state, ...opts.initialState };
+  this.convertToLlm = opts.convertToLlm || defaultConvertToLlm;
+  this.transformContext = opts.transformContext;
+  this.steeringMode = opts.steeringMode || "one-at-a-time";
+  this.followUpMode = opts.followUpMode || "one-at-a-time";
+  this.streamFn = opts.streamFn || streamSimple;
+  this._sessionId = opts.sessionId;
+  this.getApiKey = opts.getApiKey;
+  this._onPayload = opts.onPayload;
+  this._thinkingBudgets = opts.thinkingBudgets;
+  this._transport = opts.transport ?? "sse";
+  this._maxRetryDelayMs = opts.maxRetryDelayMs;
+  this._toolExecution = opts.toolExecution ?? "parallel";
+  this._beforeToolCall = opts.beforeToolCall;
+  this._afterToolCall = opts.afterToolCall;
+}`}
+  filename="packages/agent/src/agent.ts"
+  language="typescript"
+  startLine={156}
+  highlights={[
+    { line: 160, note: "steeringMode 默认 one-at-a-time — 每次只注入一条 steering 消息" },
+    { line: 161, note: "followUpMode 也默认 one-at-a-time" },
+    { line: 169, note: "toolExecution 默认 parallel — 多个工具并发执行" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent.ts#L156"
+/>
+
+注意 `defaultConvertToLlm` 的实现非常简单：
+
+```typescript
+function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
+  return messages.filter((m) =>
+    m.role === "user" || m.role === "assistant" || m.role === "toolResult"
+  );
+}
+```
+
+它只是把非 LLM 标准角色的消息过滤掉。这就是 AgentMessage 和 Message 之间的默认转换 — 简单、安全、可覆盖。
+
+### prompt()：启动一次对话
+
+<SourceReader
+  client:visible
+  code={`/** Send a prompt with an AgentMessage */
+async prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
+async prompt(input: string, images?: ImageContent[]): Promise<void>;
+async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]) {
+  if (this._state.isStreaming) {
+    throw new Error(
+      "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+    );
+  }
+
+  const model = this._state.model;
+  if (!model) throw new Error("No model configured");
+
+  let msgs: AgentMessage[];
+
+  if (Array.isArray(input)) {
+    msgs = input;
+  } else if (typeof input === "string") {
+    const content: Array<TextContent | ImageContent> = [{ type: "text", text: input }];
+    if (images && images.length > 0) {
+      content.push(...images);
+    }
+    msgs = [{
+      role: "user",
+      content,
+      timestamp: Date.now(),
+    }];
+  } else {
+    msgs = [input];
+  }
+
+  await this._runLoop(msgs);
+}`}
+  filename="packages/agent/src/agent.ts"
+  language="typescript"
+  startLine={392}
+  highlights={[
+    { line: 396, note: "状态守卫：isStreaming 时调用 prompt() 直接抛错 — 要用 steer() 或 followUp()" },
+    { line: 393, note: "三种重载：字符串、单条 AgentMessage、AgentMessage 数组" },
+    { line: 425, note: "_runLoop 是真正的执行入口，下面详细分析" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent.ts#L392"
+/>
+
+### _runLoop：Agent 类的核心
+
+<SourceReader
+  client:visible
+  code={`private async _runLoop(messages?: AgentMessage[], options?: { skipInitialSteeringPoll?: boolean }) {
+  const model = this._state.model;
+  if (!model) throw new Error("No model configured");
+
+  this.runningPrompt = new Promise<void>((resolve) => {
+    this.resolveRunningPrompt = resolve;
+  });
+
+  this.abortController = new AbortController();
+  this._state.isStreaming = true;
+  this._state.streamMessage = null;
+  this._state.error = undefined;
+
+  const context: AgentContext = {
+    systemPrompt: this._state.systemPrompt,
+    messages: this._state.messages.slice(),  // ← 浅拷贝！
+    tools: this._state.tools,
+  };
+
+  const config: AgentLoopConfig = {
+    model,
+    // ...
+    convertToLlm: this.convertToLlm,
+    transformContext: this.transformContext,
+    getApiKey: this.getApiKey,
+    getSteeringMessages: async () => {
+      if (skipInitialSteeringPoll) {
+        skipInitialSteeringPoll = false;
+        return [];
+      }
+      return this.dequeueSteeringMessages();
+    },
+    getFollowUpMessages: async () => this.dequeueFollowUpMessages(),
+  };
+
+  try {
+    if (messages) {
+      await runAgentLoop(
+        messages, context, config,
+        async (event) => this._processLoopEvent(event),
+        this.abortController.signal, this.streamFn,
+      );
+    } else {
+      await runAgentLoopContinue(
+        context, config,
+        async (event) => this._processLoopEvent(event),
+        this.abortController.signal, this.streamFn,
+      );
+    }
+  } catch (err: any) {
+    // ... 错误处理：创建一个 error AssistantMessage ...
+  }
+}`}
+  filename="packages/agent/src/agent.ts"
+  language="typescript"
+  startLine={508}
+  highlights={[
+    { line: 512, note: "runningPrompt：外部通过 waitForIdle() 等待这个 Promise" },
+    { line: 517, note: "每次运行创建新的 AbortController — abort() 只影响当前运行" },
+    { line: 523, note: "messages.slice() 浅拷贝 — 后面详细讨论这个设计决策" },
+    { line: 533, note: "getSteeringMessages 闭包捕获了 skipInitialSteeringPoll — 巧妙的一次性跳过" },
+    { line: 536, note: "getFollowUpMessages 直接转发给 dequeueFollowUpMessages" },
+    { line: 541, note: "_processLoopEvent：Agent 在这里同步更新自己的 state" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent.ts#L508"
+/>
+
+### _processLoopEvent：事件驱动的状态更新
+
+Agent 类通过 `_processLoopEvent` 把低层事件转换为状态变更：
+
+<SourceReader
+  client:visible
+  code={`private _processLoopEvent(event: AgentEvent): void {
+  switch (event.type) {
+    case "message_start":
+      this._state.streamMessage = event.message;
+      break;
+
+    case "message_update":
+      this._state.streamMessage = event.message;
+      break;
+
+    case "message_end":
+      this._state.streamMessage = null;
+      this.appendMessage(event.message);
+      break;
+
+    case "tool_execution_start": {
+      const pendingToolCalls = new Set(this._state.pendingToolCalls);
+      pendingToolCalls.add(event.toolCallId);
+      this._state.pendingToolCalls = pendingToolCalls;
+      break;
+    }
+
+    case "tool_execution_end": {
+      const pendingToolCalls = new Set(this._state.pendingToolCalls);
+      pendingToolCalls.delete(event.toolCallId);
+      this._state.pendingToolCalls = pendingToolCalls;
+      break;
+    }
+
+    case "turn_end":
+      if (event.message.role === "assistant" && (event.message as any).errorMessage) {
+        this._state.error = (event.message as any).errorMessage;
+      }
+      break;
+
+    case "agent_end":
+      this._state.isStreaming = false;
+      this._state.streamMessage = null;
+      break;
+  }
+
+  this.emit(event);
+}`}
+  filename="packages/agent/src/agent.ts"
+  language="typescript"
+  startLine={459}
+  highlights={[
+    { line: 462, note: "streamMessage 在 streaming 期间不断更新 — UI 通过它渲染实时输出" },
+    { line: 469, note: "message_end：streamMessage 清空，消息归档到 messages 数组" },
+    { line: 473, note: "每次都创建新 Set！这是为了触发 UI 框架的响应式更新（引用变了才会重渲染）" },
+    { line: 500, note: "最后才 emit 给外部监听器 — 保证 Agent 自身状态先更新完毕" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent.ts#L459"
+/>
+
+### Steering 和 Follow-up 队列
+
+<SourceReader
+  client:visible
+  code={`/** Queue a steering message while the agent is running. */
+steer(m: AgentMessage) {
+  this.steeringQueue.push(m);
+}
+
+/** Queue a follow-up message to be processed after the agent finishes. */
+followUp(m: AgentMessage) {
+  this.followUpQueue.push(m);
+}
+
+private dequeueSteeringMessages(): AgentMessage[] {
+  if (this.steeringMode === "one-at-a-time") {
+    if (this.steeringQueue.length > 0) {
+      const first = this.steeringQueue[0];
+      this.steeringQueue = this.steeringQueue.slice(1);
+      return [first];
+    }
+    return [];
+  }
+
+  const steering = this.steeringQueue.slice();
+  this.steeringQueue = [];
+  return steering;
+}
+
+private dequeueFollowUpMessages(): AgentMessage[] {
+  if (this.followUpMode === "one-at-a-time") {
+    if (this.followUpQueue.length > 0) {
+      const first = this.followUpQueue[0];
+      this.followUpQueue = this.followUpQueue.slice(1);
+      return [first];
+    }
+    return [];
+  }
+
+  const followUp = this.followUpQueue.slice();
+  this.followUpQueue = [];
+  return followUp;
+}`}
+  filename="packages/agent/src/agent.ts"
+  language="typescript"
+  startLine={311}
+  highlights={[
+    { line: 312, note: "steer() 是同步的 — 随时可以调用，即使 Agent 正在 streaming" },
+    { line: 317, note: "followUp() 也是同步的 — 消息入队后等待 Agent 自然停止时被消费" },
+    { line: 322, note: "one-at-a-time：只取第一条，剩余的留在队列里等下一轮" },
+    { line: 330, note: "all 模式：slice() 取出全部，然后清空原队列" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent.ts#L311"
+/>
+
+---
+
+## 2.3 边界行为与陷阱
+
+理解 Pi 的设计不仅要看正常流程，更要看边界情况。这些细节决定了框架的健壮性。
+
+### Steering one-at-a-time vs all
+
+```
+场景：用户在 Agent 执行工具期间快速输入了 3 条 steering 消息
+
+one-at-a-time 模式（Pi 默认）:
+  Turn 5: [工具执行完毕] → 取出 steering[0] → 注入 → LLM 回复
+  Turn 6: [工具执行完毕] → 取出 steering[1] → 注入 → LLM 回复
+  Turn 7: [工具执行完毕] → 取出 steering[2] → 注入 → LLM 回复
+
+all 模式:
+  Turn 5: [工具执行完毕] → 取出全部 3 条 → 一次性注入 → LLM 回复（需要同时理解 3 条指令）
+```
+
+**one-at-a-time 的优势**：LLM 每次只处理一条新指令，认知负担更小。如果第一条 steering 就改变了方向，后面的 steering 仍然能基于新方向的上下文执行。
+
+**all 的优势**：减少 LLM 调用次数。如果 3 条 steering 是相关的（比如"用中文"+"用表格"+"加总结"），一次性给出效果更好。
+
+### Follow-up 只在"真的要停"时触发
+
+Follow-up 的检查时机非常精确 — 只在内层循环完全退出后才检查：
+
+```
+Agent 工作中...
+  内层循环检查：有工具调用？  → 是 → 继续内层循环
+  内层循环检查：有 steering？ → 是 → 继续内层循环
+  内层循环检查：有工具调用？  → 否
+  内层循环检查：有 steering？ → 否
+  → 内层循环退出
+
+外层循环检查：有 follow-up？ → 是 → 把 follow-up 变成 pendingMessages → 重新进入内层循环
+外层循环检查：有 follow-up？ → 否 → 真正结束
+```
+
+关键区别：**Steering 在工具执行的间隙就会被消费，Follow-up 要等到 Agent 认为自己"完成了"才会被消费。**
+
+### abort() 在不同阶段的行为
+
+```
+阶段 1: LLM 正在 streaming
+  → abort() 发出信号
+  → streamSimple 收到 AbortSignal，停止接收
+  → 返回 stopReason="aborted" 的 AssistantMessage
+  → runLoop 检查到 aborted，立即 return
+
+阶段 2: 工具正在执行（sequential 模式）
+  → abort() 发出信号
+  → 当前工具执行完毕（工具自己决定是否 honor signal）
+  → 下一个工具执行前检查 signal → 跳过
+  → 回到 runLoop，在下一次 LLM 调用前退出
+
+阶段 3: 工具并发执行（parallel 模式）
+  → abort() 发出信号
+  → 所有正在执行的工具收到 signal
+  → 各工具自行决定是否提前退出
+  → 全部完成后回到 runLoop，退出
+```
+
+重点：**abort 是协作式的**。Pi 不会强制 kill 正在执行的工具，而是把 AbortSignal 传递给工具，让工具自己决定如何处理。
+
+### pendingToolCalls 每次创建新 Set
+
+```typescript
+case "tool_execution_start": {
+  const pendingToolCalls = new Set(this._state.pendingToolCalls);
+  pendingToolCalls.add(event.toolCallId);
+  this._state.pendingToolCalls = pendingToolCalls;  // ← 新引用！
+  break;
+}
+```
+
+为什么不直接 `this._state.pendingToolCalls.add(event.toolCallId)` ？因为 React/Solid/Vue 等 UI 框架靠 **引用比较** 判断是否需要重渲染。如果只是修改 Set 内容但引用不变，UI 不会更新。每次创建新 Set 保证引用变化，从而触发 UI 响应。
+
+### replaceMessages 的浅拷贝 vs appendMessage 的 spread
+
+```typescript
+replaceMessages(ms: AgentMessage[]) {
+  this._state.messages = ms.slice();    // ← 浅拷贝：切断与调用者的引用关系
+}
+
+appendMessage(m: AgentMessage) {
+  this._state.messages = [...this._state.messages, m];  // ← 创建新数组：触发响应式更新
+}
+```
+
+两个方法的模式一致：**每次都产生新的数组引用**。`replaceMessages` 用 `slice()` 断开与外部数组的引用，`appendMessage` 用 spread 创建新数组。如果直接 `push(m)`，外部的响应式系统不会感知到变化。
+
+### State mutators 不 emit 事件
+
+```typescript
+setSystemPrompt(v: string) {
+  this._state.systemPrompt = v;
+  // 注意：没有 emit 任何事件！
+}
+
+setModel(m: Model<any>) {
+  this._state.model = m;
+  // 同样没有 emit
+}
+```
+
+这是一个有意的设计决策：**配置变更不触发事件**。事件只在 Agent 运行期间（`_processLoopEvent` 中）由 loop 事件驱动。如果 UI 需要响应配置变更，应该直接读 `agent.state`，而不是监听事件。
+
+---
+
+## 2.4 动手：实现 mini-loop
+
+理论讲完了，现在动手。我们通过 6 个递进的 demo，从最简单的单次调用开始，逐步构建出一个具备事件系统、steering、abort 的 mini agent loop。
+
+> 所有 demo 都在 `demos/02-mini-loop/src/` 目录下，可以直接运行：
+> ```bash
+> cd demos/02-mini-loop
+> npx tsx src/01-single-turn.ts   # 单次调用
+> npx tsx src/02-multi-turn.ts    # 完整循环
+> npx tsx src/03-with-events.ts   # 事件系统
+> npx tsx src/04-steering.ts      # Steering 队列
+> npx tsx src/05-abort.ts         # 中止处理
+> npx tsx src/06-edge-cases.ts    # 边界情况
+> ```
+> 每个 demo 都支持 `MOCK=1` 环境变量跳过真实 API 调用。
+
+### Demo 01: 单次调用 — 循环的构件
+
+Agent Loop 的最小构件是"一次 LLM 调用 + 一次工具执行"。先理解这个构件，再理解循环。
+
+<CodeComparison client:visible
+  left={{
+    code: `// Demo 01: Single Turn
+// 不是循环，是循环的基本构件
+
+// Step 1: 调用 LLM，带上工具定义
+const response1 = await client.messages.create({
+  model: "claude-sonnet-4-5-20250514",
+  max_tokens: 1024,
+  tools: [calculatorTool],
+  messages,
+});
+
+// Step 2: LLM 返回 tool_use
+const toolUseBlock = response1.content.find(
+  (block) => block.type === "tool_use"
+);
+
+// Step 3: 执行工具
+const toolResult = executeTool(
+  toolUseBlock.name, toolUseBlock.input
+);
+
+// Step 4: 把工具结果发回 LLM
+messages.push({ role: "assistant", content: response1.content });
+messages.push({ role: "user", content: [{
+  type: "tool_result",
+  tool_use_id: toolUseBlock.id,
+  content: toolResult,
+}]});
+
+// Step 5: 拿到最终回复
+const response2 = await client.messages.create({
+  model: "claude-sonnet-4-5-20250514",
+  max_tokens: 1024,
+  tools: [calculatorTool],
+  messages,
+});`,
+    label: "demos/02-mini-loop/src/01-single-turn.ts",
+    language: "typescript"
+  }}
+  right={{
+    code: `// Pi agent-loop.ts 中对应的逻辑
+
+// Step 1+2: streamAssistantResponse
+// 调用 LLM 并流式接收 response
+const message = await streamAssistantResponse(
+  currentContext, config, signal, emit, streamFn
+);
+
+// Step 3: executeToolCalls
+// 从 response 中提取 tool calls 并执行
+const toolCalls = message.content
+  .filter((c) => c.type === "toolCall");
+const toolResults = await executeToolCalls(
+  currentContext, message, config, signal, emit
+);
+
+// Step 4: 自动追加到 context
+for (const result of toolResults) {
+  currentContext.messages.push(result);
+  newMessages.push(result);
+}
+
+// Step 5: 由 while 循环驱动下一轮
+// → 再次调用 streamAssistantResponse
+// → 如果没有 tool calls 就退出循环
+
+// Pi 的优势：
+// - 流式输出（逐字渲染）
+// - 事件驱动（UI 可以订阅）
+// - 错误处理（stopReason 检查）
+// - 中止支持（AbortSignal）`,
+    label: "Pi agent-loop.ts 对应逻辑",
+    language: "typescript"
+  }}
+/>
+
+文件路径：`demos/02-mini-loop/src/01-single-turn.ts`
+
+### Demo 02: 完整循环 — while IS the agent
+
+把 Demo 01 的构件放进 while 循环，就是一个完整的 Agent：
+
+<SourceReader
+  client:visible
+  code={`// ── The Agent Loop ──────────────────────────────────────────────
+// This is the core pattern: while(true), call LLM, check if done, execute tools, repeat
+while (true) {
+  turnCount++;
+  printEvent(\`Turn \${turnCount}\`, "调用 LLM...");
+
+  const response = await client.messages.create({
+    model: "claude-sonnet-4-5-20250514",
+    max_tokens: 1024,
+    tools,
+    messages,
+  });
+
+  // Collect all tool_use blocks from this response
+  const toolUseBlocks = response.content.filter(
+    (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+  );
+
+  // If no tool calls, the agent is done
+  if (response.stop_reason === "end_turn" || toolUseBlocks.length === 0) {
+    printEvent("Done", \`Agent 完成 (stop_reason=\${response.stop_reason})\`);
+    break;
+  }
+
+  // Execute each tool call and collect results
+  const toolResults: Anthropic.ToolResultBlockParam[] = [];
+  for (const toolUse of toolUseBlocks) {
+    const result = executeTool(toolUse.name, toolUse.input as Record<string, unknown>);
+    toolResults.push({
+      type: "tool_result",
+      tool_use_id: toolUse.id,
+      content: result,
+    });
+  }
+
+  // Add assistant response and tool results to message history
+  messages.push({ role: "assistant", content: response.content });
+  messages.push({ role: "user", content: toolResults });
+}`}
+  filename="demos/02-mini-loop/src/02-multi-turn.ts"
+  language="typescript"
+  startLine={116}
+  highlights={[
+    { line: 116, note: "while(true) — 这就是 Agent 和 ChatBot 的根本区别" },
+    { line: 136, note: "退出条件：LLM 不再调用工具 = 任务完成" },
+    { line: 149, note: "工具结果以 user role 发回 — 这是 LLM API 的要求" }
+  ]}
+  githubUrl="https://github.com/user/pi-tutorial/blob/main/demos/02-mini-loop/src/02-multi-turn.ts"
+/>
+
+对比 Pi 的 `runLoop`，我们的 demo 缺少：双层循环（steering/follow-up）、流式输出、事件系统、AbortSignal、工具 prepare/finalize 生命周期。接下来的 demo 会逐步补上这些能力。
+
+### Demo 03: 事件系统
+
+Agent Loop 本身不应该关心"怎么显示输出"。事件系统把"循环逻辑"和"外部关注"解耦：
+
+<CodeComparison client:visible
+  left={{
+    code: `// Demo 03: 我们的事件定义
+type AgentEvent =
+  | { type: "agent_start"; task: string }
+  | { type: "agent_end"; turnCount: number }
+  | { type: "turn_start"; turn: number }
+  | { type: "turn_end"; turn: number; stopReason: string }
+  | { type: "message_start" }
+  | { type: "message_end"; stopReason: string }
+  | { type: "tool_start"; name: string; input: unknown }
+  | { type: "tool_end"; name: string; result: string };
+
+// 简单的 EventEmitter
+class SimpleEventEmitter {
+  private handlers: EventHandler[] = [];
+  on(handler: EventHandler): void {
+    this.handlers.push(handler);
+  }
+  emit(event: AgentEvent): void {
+    for (const handler of this.handlers) {
+      handler(event);
+    }
+  }
+}
+
+// 使用：在循环中发射事件
+emitter.emit({ type: "turn_start", turn: turnCount });
+// ... LLM 调用 ...
+emitter.emit({ type: "tool_start", name: toolUse.name, input: toolUse.input });
+// ... 工具执行 ...
+emitter.emit({ type: "tool_end", name: toolUse.name, result });`,
+    label: "我们的简化实现",
+    language: "typescript"
+  }}
+  right={{
+    code: `// Pi 的事件定义（types.ts）
+export type AgentEvent =
+  | { type: "agent_start" }
+  | { type: "agent_end"; messages: AgentMessage[] }
+  | { type: "turn_start" }
+  | { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+  | { type: "message_start"; message: AgentMessage }
+  | { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
+  | { type: "message_end"; message: AgentMessage }
+  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+  | { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+  | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+
+// Pi 使用 async emit 函数（不是 EventEmitter）
+type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+// emit 是 async 的 — 保证顺序
+await emit({ type: "turn_start" });
+// ... LLM 调用 ...
+await emit({ type: "tool_execution_start", toolCallId: toolCall.id, toolName: toolCall.name, args: toolCall.arguments });
+// ... 工具执行 ...
+await emit({ type: "tool_execution_end", ... });`,
+    label: "Pi 的完整实现",
+    language: "typescript"
+  }}
+/>
+
+Pi 的事件系统有几个重要区别：
+1. **emit 是 async 的** — 保证事件严格按顺序到达订阅者
+2. **message_update 事件** — 支持流式渲染（我们的 demo 没有 streaming）
+3. **tool_execution_update** — 工具可以在执行过程中发射进度更新
+4. **事件携带完整数据** — 每个事件都包含足够的信息，订阅者不需要维护额外状态
+
+文件路径：`demos/02-mini-loop/src/03-with-events.ts`
+
+### Demo 04: Steering 队列
+
+Steering 让用户能在 Agent 运行中途注入新指令：
+
+<SourceReader
+  client:visible
+  code={`// ── Steering Queue ──────────────────────────────────────────────
+// A simple queue of user messages that can be injected mid-run
+const steeringQueue: string[] = [];
+
+function addSteering(message: string): void {
+  steeringQueue.push(message);
+  printEvent("STEERING_ADDED", \`"\${message}"\`);
+}
+
+function drainSteering(): string[] {
+  const messages = [...steeringQueue];
+  steeringQueue.length = 0;
+  return messages;
+}
+
+// ── 在循环中检查 steering ────────────────────────────────────
+while (turnCount < MAX_TURNS) {
+  turnCount++;
+
+  // Check steering queue before each LLM call
+  const steering = drainSteering();
+  if (steering.length > 0) {
+    printEvent("STEERING_INJECT", \`Injecting \${steering.length} steering message(s)\`);
+    for (const msg of steering) {
+      // 注入为 user message
+      messages.push({ role: "user", content: "[Steering]: " + msg });
+    }
+  }
+
+  // 继续正常的 LLM 调用...
+}`}
+  filename="demos/02-mini-loop/src/04-steering.ts"
+  language="typescript"
+  startLine={14}
+  highlights={[
+    { line: 14, note: "最简单的队列：一个数组 + push + drain" },
+    { line: 22, note: "drainSteering 取出全部消息并清空队列 — 对应 Pi 的 all 模式" },
+    { line: 29, note: "在每次 LLM 调用前检查队列 — 这是 steering 的注入点" }
+  ]}
+/>
+
+对比 Pi 的实现：Pi 把 steering 检查放在**内层循环的每轮结束处**（工具执行完毕后），而我们的 demo 放在**每轮开始处**（LLM 调用前）。效果相似，但 Pi 的位置更精确 — 它保证当前轮的所有工具执行完毕后，才检查是否有新的 steering。
+
+文件路径：`demos/02-mini-loop/src/04-steering.ts`
+
+### Demo 05: Abort 中止处理
+
+AbortController 是 Web 标准的中止机制。Pi 在循环的多个点位检查 AbortSignal：
+
+<SourceReader
+  client:visible
+  code={`async function runAgentWithAbort(
+  client: Anthropic,
+  task: string,
+  signal: AbortSignal,
+): Promise<{ completed: boolean; turns: number }> {
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: task },
+  ];
+  let turnCount = 0;
+  const MAX_TURNS = 20;
+
+  while (turnCount < MAX_TURNS) {
+    // Check abort before LLM call
+    if (signal.aborted) {
+      printEvent("ABORT", "Signal detected before LLM call — exiting loop");
+      return { completed: false, turns: turnCount };
+    }
+
+    turnCount++;
+    let response: Anthropic.Message;
+    try {
+      response = await client.messages.create({
+        model: "claude-sonnet-4-5-20250514",
+        max_tokens: 1024,
+        tools,
+        messages,
+      });
+    } catch (err) {
+      if (signal.aborted) {
+        printEvent("ABORT", "LLM call interrupted by abort signal");
+        return { completed: false, turns: turnCount };
+      }
+      throw err;
+    }
+
+    // Check abort after LLM call
+    if (signal.aborted) {
+      printEvent("ABORT", "Signal detected after LLM call — exiting loop");
+      return { completed: false, turns: turnCount };
+    }
+
+    // ... 正常处理 ...
+
+    for (const toolUse of toolUseBlocks) {
+      // Check abort before each tool execution
+      if (signal.aborted) {
+        printEvent("ABORT", \`Signal detected before tool \${toolUse.name} — exiting\`);
+        return { completed: false, turns: turnCount };
+      }
+
+      const result = await executeTool(toolUse.name, toolUse.input);
+      // ...
+    }
+  }
+}`}
+  filename="demos/02-mini-loop/src/05-abort.ts"
+  language="typescript"
+  startLine={39}
+  highlights={[
+    { line: 52, note: "LLM 调用前检查 — 避免不必要的 API 调用" },
+    { line: 68, note: "LLM 调用后检查 — 可能在等待 API 响应期间被 abort" },
+    { line: 74, note: "工具执行前检查 — 跳过后续工具（已执行的不回滚）" }
+  ]}
+/>
+
+文件路径：`demos/02-mini-loop/src/05-abort.ts`
+
+### Demo 06: 边界情况
+
+真实 Agent 框架需要处理的边界情况远比核心循环复杂。Demo 06 测试了三个关键场景：
+
+**场景 1：工具错误恢复**
+
+```typescript
+// 工具抛出错误时，不是让整个 Agent 崩溃
+// 而是把错误作为 tool_result 返回给 LLM
+function safeExecuteTool(name: string, input: Record<string, unknown>)
+  : { result: string; isError: boolean } {
+  try {
+    const result = executeTool(name, input);
+    return { result, isError: false };
+  } catch (err) {
+    return { result: `Error: ${(err as Error).message}`, isError: true };
+  }
+}
+
+// 把错误发回 LLM 时标记 is_error: true
+toolResults.push({
+  type: "tool_result",
+  tool_use_id: toolUse.id,
+  content: result,
+  is_error: isError,  // ← 告诉 LLM 这是错误，不是正常结果
+});
+```
+
+这对应 Pi 的 `createErrorToolResult` 函数和 `prepareToolCall` 中的 try-catch 逻辑。LLM 收到错误后通常会自动调整策略 — 比如除以零失败后改用其他除数。
+
+**场景 2：Steering 队列模式对比**
+
+```
+one-at-a-time 模式（Pi 默认）:
+  队列: ["请用中文回答", "格式用表格", "加上总结"]
+  本轮注入: "请用中文回答"
+  队列剩余: ["格式用表格", "加上总结"]
+  → 每轮消耗一条
+
+all 模式:
+  队列: ["请用中文回答", "格式用表格", "加上总结"]
+  本轮注入: ["请用中文回答", "格式用表格", "加上总结"]
+  队列剩余: []
+  → 一次性全部消耗
+```
+
+**场景 3：空内容处理**
+
+LLM 偶尔会返回空的 `content` 数组。Pi 的 `runLoop` 通过检查 `toolCalls.length > 0` 和 `hasMoreToolCalls` 来处理这种情况 — 没有工具调用时直接退出内层循环。
+
+文件路径：`demos/02-mini-loop/src/06-edge-cases.ts`
+
+### 从 Demo 到 Pi：完整的映射
+
+<CodeComparison client:visible
+  left={{
+    code: `// 我们的 6 个 Demo 构建的 mini-loop
+// 特性清单：
+
+// Demo 01: 单次 LLM + 工具
+//   → 理解 tool_use/tool_result 协议
+
+// Demo 02: while(true) 循环
+//   → Agent 的核心骨架
+
+// Demo 03: 事件系统
+//   → 8 种 AgentEvent
+//   → 同步 EventEmitter
+
+// Demo 04: Steering 队列
+//   → 简单的 drain-all 模式
+
+// Demo 05: AbortController
+//   → 3 个检查点
+
+// Demo 06: 边界情况
+//   → 错误恢复
+//   → 队列模式对比
+//   → 空内容处理
+
+// 总代码量：~400 行（6 个文件）`,
+    label: "Mini-Loop（6 个 Demo）",
+    language: "typescript"
+  }}
+  right={{
+    code: `// Pi 的完整实现
+// 在我们的基础上增加的能力：
+
+// agent-loop.ts (617 行):
+//   → 双层循环（steering + follow-up）
+//   → 流式 LLM 响应（SSE streaming）
+//   → 两层转换管道（transformContext + convertToLlm）
+//   → 工具 prepare/execute/finalize 三阶段
+//   → parallel + sequential 工具执行
+//   → beforeToolCall / afterToolCall hooks
+//   → 参数验证（validateToolArguments）
+
+// agent.ts (~500 行):
+//   → 状态机（IDLE ↔ STREAMING）
+//   → 响应式状态更新（新引用触发 UI 刷新）
+//   → 两种队列模式（one-at-a-time / all）
+//   → waitForIdle() / reset()
+//   → continue() 支持重试
+
+// types.ts (~310 行):
+//   → 12 种 AgentEvent（vs 我们的 8 种）
+//   → AgentMessage 类型扩展机制
+//   → AgentTool 泛型（TypeBox schema）
+
+// 总核心代码量：~1,427 行（3 个文件）`,
+    label: "Pi 完整实现",
+    language: "typescript"
+  }}
+/>
+
+---
+
+## 2.5 本章小结
+
+四个核心认知：
+
+1. **Agent Loop 本质是双层 while 循环** — 内层处理 tool calls + steering，外层处理 follow-up。这个结构看似简单，但精确的检查时机和状态管理让它能覆盖所有运行时场景。
+
+2. **Steering = 中断（工具间隙注入），Follow-up = 续命（Agent 要停时拉回来）** — 两种机制的触发时机不同、语义不同，但都通过消息队列实现，且都支持 one-at-a-time 和 all 两种消费模式。
+
+3. **事件驱动是 Agent 架构的关键设计** — Pi 定义了 12 种 AgentEvent，覆盖 Agent > Turn > Message/Tool 三层嵌套的完整生命周期。事件是 async emit 的，保证严格有序。Agent 类先更新自身状态，再广播给外部监听者。
+
+4. **生产级框架的差距在边界处理** — 从 30 行 demo 到 Pi 的 1,427 行核心代码，增加的主要是：流式输出、两层转换管道、工具三阶段生命周期（prepare → execute → finalize）、响应式状态管理、以及大量的防御性错误处理。
+
+下一章，我们将深入 Pi 的工具系统 — 看看 `AgentTool` 的 TypeBox schema 验证、`beforeToolCall`/`afterToolCall` hooks、以及 coding agent 的 7 个内置工具是如何实现的。
