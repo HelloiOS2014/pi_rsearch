@@ -1,0 +1,19 @@
+{
+  "name": "@pi-tutorial/demo-06-my-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@sinclair/typebox": "^0.34.0",
+    "@pi-tutorial/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "tsx": "^4.19.0"
+  }
+}
