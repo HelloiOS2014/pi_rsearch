@@ -1,0 +1,174 @@
+---
+title: "附录 D：CLI 参考"
+chapter: 93
+description: "Pi CLI 完整命令行参数和环境变量参考"
+---
+
+# CLI 完整参考
+
+Pi CLI 的所有命令行参数和环境变量速查。
+
+---
+
+## 核心参数
+
+| 参数 | 短写 | 说明 | 示例 |
+|------|------|------|------|
+| `--model <id>` | `-m` | 指定使用的模型 | `pi -m claude-sonnet-4-20250514` |
+| `--provider <name>` | | 指定 provider | `pi --provider openai` |
+| `--api-key <key>` | | 直接传入 API key | `pi --api-key sk-xxx` |
+| `--thinking <level>` | `-t` | 设置思考级别 | `pi -t high` |
+| `--system-prompt <text>` | `-s` | 设置系统提示词 | `pi -s "你是一个代码审查助手"` |
+| `--append-system-prompt <text>` | | 追加到默认系统提示词之后 | `pi --append-system-prompt "只用中文回复"` |
+
+## 会话管理
+
+| 参数 | 短写 | 说明 | 示例 |
+|------|------|------|------|
+| `--continue` | `-c` | 恢复上一次会话 | `pi -c` |
+| `--resume <id>` | `-r` | 恢复指定 ID 的会话 | `pi -r abc123` |
+| `--session <name>` | | 使用命名会话 | `pi --session refactor` |
+| `--fork` | | 从当前会话分叉一个新会话 | `pi -c --fork` |
+| `--no-session` | | 不保存会话记录 | `pi --no-session` |
+| `--session-dir <path>` | | 自定义会话存储目录 | `pi --session-dir ./sessions` |
+
+## 工具与扩展
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `--no-tools` | 禁用所有工具 | `pi --no-tools "解释这段代码"` |
+| `--tools <list>` | 只启用指定工具（逗号分隔） | `pi --tools bash,read,write` |
+| `--extension <path>` | 加载扩展 | `pi --extension ./my-ext.js` |
+| `--no-extensions` | 禁用所有扩展 | `pi --no-extensions` |
+| `--skill <name>` | 只加载指定 skill | `pi --skill commit` |
+| `--no-skills` | 禁用所有 skills | `pi --no-skills` |
+
+## 输出控制
+
+| 参数 | 短写 | 说明 | 示例 |
+|------|------|------|------|
+| `--print` | `-p` | 非交互模式，输出结果后退出 | `echo "解释" \| pi -p` |
+| `--mode <format>` | | 输出格式：`text` / `json` / `rpc` | `pi -p --mode json "你好"` |
+| `--export <path>` | | 将会话导出到文件 | `pi --export chat.json` |
+| `--verbose` | `-v` | 输出详细调试信息 | `pi -v` |
+
+## 模型查询
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `--models` | 列出所有可用模型（简洁） | `pi --models` |
+| `--list-models` | 列出所有可用模型（详细） | `pi --list-models` |
+
+## 高级参数
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `--offline` | 离线模式，不调用任何 API | `pi --offline` |
+| `--max-turns <n>` | 限制最大循环轮次 | `pi --max-turns 10` |
+| `--no-compaction` | 禁用上下文自动压缩 | `pi --no-compaction` |
+| `--version` | 显示版本号 | `pi --version` |
+| `--help` | 显示帮助信息 | `pi --help` |
+
+---
+
+## 包管理命令
+
+Pi 内置包管理器，用于安装扩展和 skills。
+
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `pi install <pkg>` | 安装包 | `pi install @anthropic/skill-commit` |
+| `pi remove <pkg>` | 移除包 | `pi remove @anthropic/skill-commit` |
+| `pi update [pkg]` | 更新包（不指定则更新全部） | `pi update` |
+| `pi list` | 列出已安装的包 | `pi list` |
+
+---
+
+## 环境变量
+
+### Provider API Keys
+
+| 变量名 | Provider |
+|--------|----------|
+| `ANTHROPIC_API_KEY` | Anthropic（Claude） |
+| `OPENAI_API_KEY` | OpenAI（GPT） |
+| `GOOGLE_API_KEY` | Google（Gemini） |
+| `MISTRAL_API_KEY` | Mistral |
+| `GROQ_API_KEY` | Groq |
+| `XAI_API_KEY` | xAI（Grok） |
+| `DEEPSEEK_API_KEY` | DeepSeek |
+| `OPENROUTER_API_KEY` | OpenRouter |
+| `TOGETHER_API_KEY` | Together AI |
+| `FIREWORKS_API_KEY` | Fireworks AI |
+| `PERPLEXITY_API_KEY` | Perplexity |
+| `COHERE_API_KEY` | Cohere |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI 端点 URL |
+| `AWS_ACCESS_KEY_ID` | AWS Bedrock |
+| `AWS_SECRET_ACCESS_KEY` | AWS Bedrock |
+| `AWS_REGION` | AWS Bedrock 区域 |
+| `VERTEX_PROJECT` | Google Vertex AI 项目 ID |
+| `VERTEX_LOCATION` | Google Vertex AI 区域 |
+| `OLLAMA_BASE_URL` | Ollama 本地服务地址（默认 `http://localhost:11434`） |
+
+### 系统环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `PI_AGENT_DIR` | Pi 配置目录 | `~/.pi/agent` |
+| `PI_OFFLINE` | 设为 `1` 启用离线模式 | — |
+| `PI_PACKAGE_DIR` | 包安装目录 | `~/.pi/agent/packages` |
+| `PI_SESSION_DIR` | 会话存储目录 | `~/.pi/agent/sessions` |
+| `PI_LOG_LEVEL` | 日志级别（`debug` / `info` / `warn` / `error`） | `info` |
+| `PI_NO_COLOR` | 设为 `1` 禁用彩色输出 | — |
+| `PI_EDITOR` | 默认编辑器路径 | `$EDITOR` |
+| `PI_SHELL` | 使用的 shell 路径 | 系统默认 shell |
+| `HTTPS_PROXY` | HTTPS 代理地址 | — |
+| `HTTP_PROXY` | HTTP 代理地址 | — |
+| `NO_PROXY` | 不走代理的地址列表 | — |
+
+---
+
+## 使用模式示例
+
+### 非交互管道模式
+
+```bash
+# 从 stdin 读取，处理后输出到 stdout
+cat buggy.ts | pi -p "找出这段代码的 bug" --mode text
+
+# 生成 JSON 格式输出
+pi -p --mode json "列出当前目录的项目结构"
+
+# 串联多个命令
+git diff | pi -p "审查这些变更，给出改进建议"
+```
+
+### 指定模型和思考级别
+
+```bash
+# 使用 Opus 模型 + 高级思考
+pi -m claude-opus-4-20250514 -t high "设计一个缓存系统"
+
+# 使用 OpenAI 模型
+pi --provider openai -m gpt-4o "解释这段代码"
+
+# 使用本地 Ollama 模型
+pi --provider ollama -m llama3 "总结这个文件"
+```
+
+### 会话管理
+
+```bash
+# 开始命名会话
+pi --session refactor "帮我重构 auth 模块"
+
+# 继续上次会话
+pi -c "上次说到哪了？"
+
+# 分叉会话尝试不同方案
+pi -c --fork "换一种方案试试"
+
+# 导出会话记录
+pi --export chat-log.json
+```

@@ -1,0 +1,242 @@
+---
+title: "附录 C：常见问题"
+chapter: 92
+description: "常见问题排查指南"
+---
+
+# 常见问题排查
+
+遇到问题时，先确认你的 Pi 版本是最新的（`pi --version`），然后按以下分类查找解决方案。
+
+---
+
+## API Key 问题
+
+### 找不到 API Key
+
+**现象：** 报错 `No API key found for provider "anthropic"` 或类似信息。
+
+**可能原因：**
+- 环境变量未设置或拼写错误
+- `.env` 文件不在项目根目录
+- Shell 配置文件中的 export 语句未生效
+
+**解决方案：**
+1. 确认环境变量名正确：`echo $ANTHROPIC_API_KEY`
+2. 如果使用 `.env` 文件，确认位置在项目根目录或 `~/.pi/agent/` 下
+3. 重新 source 配置文件：`source ~/.zshrc` 或 `source ~/.bashrc`
+4. 也可在 `models.json` 中使用 `"apiKey": "env:ANTHROPIC_API_KEY"` 显式指定
+
+### API Key 格式错误
+
+**现象：** 报错 `Invalid API key format` 或 `401 Unauthorized`。
+
+**可能原因：**
+- Key 复制时带入了多余的空格或换行
+- 使用了错误 provider 的 key
+
+**解决方案：**
+1. 检查 key 的前缀是否匹配 provider（如 Anthropic 的 key 以 `sk-ant-` 开头）
+2. 重新从 provider 控制台复制 key，注意不要带入空白字符
+3. 用 `echo -n "$ANTHROPIC_API_KEY" | wc -c` 检查长度是否正常
+
+### OAuth Token 过期
+
+**现象：** 之前能正常工作，突然报 `401` 或 `403` 错误。
+
+**可能原因：**
+- OAuth token 有有效期限制
+- Provider 端撤销了 token
+
+**解决方案：**
+1. 重新执行 OAuth 认证流程
+2. 在 `models.json` 中使用 `"apiKey": "!command"` 动态获取 token，避免过期问题
+
+---
+
+## 模型问题
+
+### 模型不存在
+
+**现象：** 报错 `Model "xxx" not found` 或 `404 Not Found`。
+
+**可能原因：**
+- 模型 ID 拼写错误
+- 该 provider 不提供此模型
+- 模型已下线或改名
+
+**解决方案：**
+1. 运行 `pi --list-models` 查看当前可用模型
+2. 检查 provider 官方文档确认模型 ID
+3. 如果是自定义模型，检查 `models.json` 中的配置
+
+### 模型不支持 Thinking
+
+**现象：** 设置 `thinkingLevel` 后报错 `Model does not support thinking`。
+
+**可能原因：**
+- 并非所有模型都支持 extended thinking
+- `models.json` 中未标记 `reasoning: true`
+
+**解决方案：**
+1. 使用支持 thinking 的模型（如 Claude Sonnet/Opus）
+2. 如果是自定义模型，在 `models.json` 的模型定义中设置 `"reasoning": true`
+3. 将 `thinkingLevel` 设为 `"none"` 跳过思考
+
+### 切换模型后报错
+
+**现象：** 在对话中途 `setModel()` 后，下一次调用失败。
+
+**可能原因：**
+- 新模型的 API 类型与旧模型不同（如从 Anthropic API 切到 OpenAI API）
+- 消息格式不兼容
+- 新模型不支持已有消息中的某些内容块类型
+
+**解决方案：**
+1. 确保新旧模型的 `api` 类型兼容
+2. 如果必须切换到不同 API 类型，考虑先 `clearMessages()` 再切换
+3. 使用 `transformContext` 在切换时做消息格式适配
+
+---
+
+## Context 问题
+
+### Context Overflow 错误
+
+**现象：** 报错 `Context window exceeded` 或 `Request too large`。
+
+**可能原因：**
+- 对话太长，消息历史超出上下文窗口
+- 单条消息内容过大（如读取了很大的文件）
+- Compaction 未启用或配置不当
+
+**解决方案：**
+1. 启用 compaction：在 `settings.json` 中设置 `"compaction": { "enabled": true }`
+2. 调整 `reserveTokens` 和 `keepRecentTokens` 的值
+3. 在 `transformContext` 中裁剪过长的工具输出
+4. 减少单次发送的内容量
+
+### Compaction 失败
+
+**现象：** 触发 compaction 后报错，或压缩后的上下文仍然过大。
+
+**可能原因：**
+- `reserveTokens` 设置太小，压缩后仍不够
+- 系统提示词本身就很长
+- 近期消息（`keepRecentTokens`）占比太高
+
+**解决方案：**
+1. 增大 `reserveTokens`（建议至少为上下文窗口的 20%）
+2. 减小 `keepRecentTokens`
+3. 精简系统提示词
+4. 实现自定义的 `transformContext` 做更激进的裁剪
+
+### 消息格式错误
+
+**现象：** 报错 `Invalid message format` 或 `Messages must alternate between user and assistant`。
+
+**可能原因：**
+- 手动构造消息时未遵循交替规则
+- `ToolResultMessage` 未紧跟在包含 `ToolUseBlock` 的 `AssistantMessage` 后面
+- 使用 `replaceMessages()` 或 `appendMessage()` 时破坏了消息顺序
+
+**解决方案：**
+1. 确保消息遵循 `user → assistant → user → ...` 的交替模式
+2. `ToolResultMessage` 必须紧跟在有工具调用的 `AssistantMessage` 后面
+3. 每个 `ToolUseBlock` 都必须有对应的 `ToolResult`
+
+---
+
+## 工具问题
+
+### 工具执行超时
+
+**现象：** 工具调用长时间无响应，最终报错 `Tool execution timed out`。
+
+**可能原因：**
+- 工具执行的操作本身耗时过长（如编译大项目）
+- 外部服务无响应
+- 工具 execute 函数中有死循环
+
+**解决方案：**
+1. 在工具的 `execute` 函数中实现超时逻辑（`AbortSignal`）
+2. 对耗时操作设置合理的超时限制
+3. 使用 `agent.abort()` 中止卡住的循环
+4. 在工具描述中告知 LLM 避免调用耗时过长的操作
+
+### 工具未找到
+
+**现象：** LLM 尝试调用某个工具，但报错 `Tool "xxx" not found`。
+
+**可能原因：**
+- 工具未注册到 Agent
+- 工具名称拼写不一致
+- 使用了 `isEnabled` 且返回 `false`
+
+**解决方案：**
+1. 确认工具已通过构造函数或 `setTools()` 注册
+2. 检查工具的 `name` 属性是否与 LLM 调用的名称一致
+3. 检查 `isEnabled` 回调逻辑
+
+### 参数验证失败
+
+**现象：** 报错 `Tool input validation failed` 或 TypeBox 验证错误。
+
+**可能原因：**
+- LLM 生成的参数不符合 TypeBox schema
+- Schema 定义过于严格（如缺少 `Optional()`）
+- LLM 理解工具描述有误
+
+**解决方案：**
+1. 在工具描述中更清晰地说明参数格式和约束
+2. 适当放宽 schema 约束，在 `execute` 中做二次验证
+3. 使用 `Type.Optional()` 标记非必需参数
+4. 添加参数示例到工具描述中
+
+---
+
+## 流式传输问题
+
+### 连接中断
+
+**现象：** 流式传输过程中突然断开，报 `Connection reset` 或 `ECONNRESET`。
+
+**可能原因：**
+- 网络不稳定
+- 代理服务器超时
+- Provider 端限流
+
+**解决方案：**
+1. 检查网络连接稳定性
+2. 如果使用代理，增大代理的超时设置
+3. Pi 内置重试机制，确认 `retry.enabled` 为 `true`
+4. 调整 `retry.maxRetries` 和 `retry.baseDelayMs`
+
+### 部分响应
+
+**现象：** 收到了一些事件，但响应不完整就结束了。
+
+**可能原因：**
+- `maxTokens` 设置过小
+- `stopReason` 为 `max_tokens` 而非 `end_turn`
+- 消费 EventStream 时提前 break 了
+
+**解决方案：**
+1. 检查 `AssistantMessage.stopReason`，如果是 `max_tokens` 则增大 `maxTokens`
+2. 确保 `for await` 循环没有提前退出
+3. 使用 `stream.result` 获取最终完整结果
+
+### 代理（Proxy）错误
+
+**现象：** 报错 `Proxy connection failed` 或 `HTTP 502/503`。
+
+**可能原因：**
+- 代理服务器配置错误
+- `HTTPS_PROXY` / `HTTP_PROXY` 环境变量设置有误
+- 代理不支持 SSE（Server-Sent Events）
+
+**解决方案：**
+1. 确认代理地址和端口正确
+2. 确保代理支持长连接和 SSE
+3. 尝试直连测试（临时去掉代理环境变量）
+4. 在 `models.json` 中为特定 provider 设置 `baseUrl` 绕过代理

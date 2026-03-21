@@ -34,17 +34,31 @@ const chapters = allChapters
     <ul class="chapter-list">
       {chapters.map((chapter, i) => {
         const isActive = currentSlug === chapter.id;
+        const isAppendix = chapter.data.chapter >= 90;
+        const prevChapter = i > 0 ? chapters[i - 1] : null;
+        const showAppendixLabel = isAppendix && (!prevChapter || prevChapter.data.chapter < 90);
         return (
-          <li>
-            <a
-              href={`/${chapter.id}`}
-              class:list={['chapter-link', { active: isActive }]}
-              aria-current={isActive ? 'page' : undefined}
-            >
-              <span class="chapter-number">{String(chapter.data.chapter).padStart(2, '0')}</span>
-              <span class="chapter-title">{chapter.data.title}</span>
-            </a>
-          </li>
+          <>
+            {showAppendixLabel && (
+              <li class="nav-divider">
+                <span class="nav-divider-label">附录</span>
+              </li>
+            )}
+            <li>
+              <a
+                href={`/${chapter.id}`}
+                class:list={['chapter-link', { active: isActive }]}
+                aria-current={isActive ? 'page' : undefined}
+              >
+                <span class="chapter-number">
+                  {isAppendix
+                    ? String.fromCharCode(65 + chapter.data.chapter - 90)
+                    : String(chapter.data.chapter).padStart(2, '0')}
+                </span>
+                <span class="chapter-title">{chapter.data.title}</span>
+              </a>
+            </li>
+          </>
         );
       })}
     </ul>
@@ -212,6 +226,20 @@ const chapters = allChapters
 
   .chapter-link.active .chapter-number {
     color: var(--accent-deep);
+  }
+
+  .nav-divider {
+    padding: 0.75rem 1.25rem 0.25rem;
+    margin-top: 0.25rem;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .nav-divider-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
   }
 
   .chapter-title {

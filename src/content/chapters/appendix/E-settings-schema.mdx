@@ -1,0 +1,181 @@
+---
+title: "附录 E：Settings Schema"
+chapter: 94
+description: "完整的 settings.json 字段参考"
+---
+
+# Settings Schema 完整参考
+
+Pi 使用 JSON 配置文件管理行为设置。本附录列出所有可用字段。
+
+---
+
+## 配置文件位置
+
+| 级别 | 路径 | 作用范围 |
+|------|------|---------|
+| 全局 | `~/.pi/agent/settings.json` | 所有项目 |
+| 项目 | `.pi/settings.json`（项目根目录下） | 当前项目 |
+
+## 合并策略
+
+当两级配置同时存在时，Pi 按以下规则合并：
+
+- **嵌套对象**：递归合并。项目级字段覆盖全局级同名字段，未指定的字段继承全局值。
+- **数组**：项目级整体覆盖全局级（不做合并）。
+- **原语值**（string / number / boolean）：项目级覆盖全局级。
+
+> 简单记忆：项目配置 = 全局配置的"补丁"。你只需要在项目配置中写需要覆盖的字段。
+
+---
+
+## 模型与 Provider
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `defaultProvider` | `string` | `"anthropic"` | 默认 provider |
+| `defaultModel` | `string` | `"claude-sonnet-4-20250514"` | 默认模型 ID |
+| `defaultThinkingLevel` | `"none" \| "low" \| "medium" \| "high"` | `"none"` | 默认思考级别 |
+
+---
+
+## Compaction（上下文压缩）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `compaction.enabled` | `boolean` | `true` | 是否启用自动上下文压缩 |
+| `compaction.reserveTokens` | `number` | `40000` | 压缩后预留给新对话的 token 空间 |
+| `compaction.keepRecentTokens` | `number` | `20000` | 压缩时保留的最近消息 token 数 |
+
+---
+
+## Retry（重试策略）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `retry.enabled` | `boolean` | `true` | 是否启用 API 调用自动重试 |
+| `retry.maxRetries` | `number` | `3` | 最大重试次数 |
+| `retry.baseDelayMs` | `number` | `1000` | 首次重试延迟（毫秒） |
+| `retry.maxDelayMs` | `number` | `30000` | 最大重试延迟（毫秒），指数退避上限 |
+
+---
+
+## Terminal（终端行为）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `terminal.showImages` | `boolean` | `true` | 是否在终端中内联显示图片（需终端支持） |
+| `terminal.clearOnShrink` | `boolean` | `false` | 窗口缩小时是否清除历史输出 |
+
+---
+
+## Images（图片处理）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `images.autoResize` | `boolean` | `true` | 是否自动缩放过大的图片以节省 token |
+| `images.blockImages` | `boolean` | `false` | 设为 `true` 阻止所有图片输入 |
+
+---
+
+## Behavior（行为模式）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `steeringMode` | `"auto" \| "manual" \| "disabled"` | `"auto"` | Steering 模式。`auto`：Agent 运行中输入自动作为 steer 指令；`manual`：需按快捷键；`disabled`：禁用 |
+| `followUpMode` | `"auto" \| "manual" \| "disabled"` | `"auto"` | Follow-up 模式。`auto`：Agent 停止后输入自动作为 follow-up；`manual`：需显式触发 |
+| `doubleEscapeAction` | `"abort" \| "none"` | `"abort"` | 连按两次 Esc 的行为：`abort` 中止当前循环，`none` 无操作 |
+| `treeFilterMode` | `"smart" \| "gitignore" \| "none"` | `"smart"` | 文件树过滤模式。`smart`：智能过滤（gitignore + 常见无关目录）；`gitignore`：仅按 .gitignore；`none`：不过滤 |
+
+---
+
+## Shell（Shell 配置）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `shellPath` | `string` | 系统默认 shell | Bash 工具使用的 shell 路径 |
+| `shellCommandPrefix` | `string` | `""` | 每条 shell 命令的前缀（如 `"source ~/.venv/bin/activate && "`） |
+
+---
+
+## Resources（资源配置）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `packages` | `string[]` | `[]` | 需要加载的包列表 |
+| `extensions` | `string[]` | `[]` | 扩展文件路径列表 |
+| `skills` | `string[]` | `[]` | 启用的 skill 列表 |
+| `prompts` | `object` | `{}` | 自定义提示词模板 |
+| `themes` | `string[]` | `[]` | 自定义主题路径列表 |
+
+---
+
+## UI（界面设置）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `theme` | `string` | `"default"` | 主题名称 |
+| `editorPaddingX` | `number` | `2` | 编辑区水平内边距（字符数） |
+| `autocompleteMaxVisible` | `number` | `8` | 自动补全菜单最大可见项数 |
+| `showHardwareCursor` | `boolean` | `false` | 是否显示终端硬件光标 |
+| `hideThinkingBlock` | `boolean` | `false` | 是否隐藏思考过程块 |
+| `quietStartup` | `boolean` | `false` | 安静启动模式，减少启动时的输出信息 |
+
+---
+
+## 完整示例
+
+### 全局配置（~/.pi/agent/settings.json）
+
+```json
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-20250514",
+  "defaultThinkingLevel": "low",
+
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 40000,
+    "keepRecentTokens": 20000
+  },
+
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3,
+    "baseDelayMs": 1000,
+    "maxDelayMs": 30000
+  },
+
+  "terminal": {
+    "showImages": true,
+    "clearOnShrink": false
+  },
+
+  "theme": "default",
+  "hideThinkingBlock": false,
+  "quietStartup": false
+}
+```
+
+### 项目配置（.pi/settings.json）
+
+```json
+{
+  "defaultModel": "claude-opus-4-20250514",
+  "defaultThinkingLevel": "high",
+
+  "compaction": {
+    "reserveTokens": 60000
+  },
+
+  "shellCommandPrefix": "source .venv/bin/activate && ",
+
+  "treeFilterMode": "gitignore",
+
+  "extensions": [
+    "./tools/custom-lint.js"
+  ]
+}
+```
+
+合并结果：使用 `claude-opus-4-20250514` 模型 + `high` 思考级别 + `60000` reserveTokens（项目覆盖），其余字段继承全局配置。

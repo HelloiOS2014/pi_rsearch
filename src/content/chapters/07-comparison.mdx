@@ -1,0 +1,558 @@
+---
+title: "框架对比"
+chapter: 7
+description: "对比 Pi / Claude Code / LangChain / Vercel AI SDK 的设计差异，提炼通用模式"
+---
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+import VideoEmbed from '../../components/tutorial/VideoEmbed';
+
+# 框架对比
+
+本章目标：将 Pi 放到更广阔的 Agent 框架生态中审视 —— 对比 Pi、Claude Code、LangChain、Vercel AI SDK 在设计哲学、核心循环、工具系统、流式处理、Provider 抽象等维度的差异，提炼出所有 Agent 框架共享的通用设计模式，以及 Pi 的独特贡献。
+
+前 6 章我们深入学习了 Pi 的每一个组件。但如果你只研究一个框架，很难分辨哪些是"通用的 Agent 设计模式"，哪些是"Pi 的特定选择"。对比是最好的学习方式。
+
+---
+
+## 7.1 设计哲学对比
+
+### 四大框架一览
+
+先从宏观视角审视四个框架的定位：
+
+| 维度 | Pi | Claude Code | LangChain | Vercel AI SDK |
+|------|-----|-------------|-----------|---------------|
+| **定位** | 开源 coding agent，可读性优先 | Anthropic 官方 coding agent | 通用 AI 应用框架 | 前端 AI 集成工具包 |
+| **语言** | TypeScript | TypeScript | Python / JS | TypeScript |
+| **理念** | 极简可读，一个 while 循环 | 功能完备，生产级 | 万物皆 Chain/Graph | 前端友好，one-liner |
+| **核心代码量** | ~1,900 行（agent-core） | ~15,000 行 | ~50,000 行（核心包） | ~8,000 行 |
+| **学习曲线** | 低 — 读完源码即懂 | 中 — 需要理解内部协议 | 高 — 抽象层深、概念多 | 低 — API 设计简洁 |
+| **可定制性** | 高 — 每层都可替换 | 中 — 扩展系统完善但闭源核心 | 高 — 组件化设计 | 中 — Provider 可扩展 |
+| **模型支持** | 多 Provider（Anthropic/OpenAI/Google/Bedrock/Azure...） | Anthropic 为主 | 几乎所有主流模型 | 多 Provider |
+| **开源** | 完全开源 | 完全开源 | 完全开源 | 完全开源 |
+
+### 设计取舍
+
+每个框架都在 **简洁性** 与 **功能性** 之间做了不同的取舍：
+
+```
+简洁 ←──────────────────────────────────── 功能
+       Pi          Vercel AI      Claude Code      LangChain
+   "你看得懂      "你写得快        "它啥都能做      "你啥都能搭
+    每一行"       每一个功能"      但你需要学习"     但你需要很多概念"
+```
+
+**Pi 的哲学**：代码即文档。核心循环只有一个 `while` 循环 + 一个 `switch`，任何开发者都能在 30 分钟内读懂。复杂功能通过扩展系统叠加，而非侵入核心。
+
+**Claude Code 的哲学**：功能完备。内置权限系统、sandbox、多模态支持、MCP 集成。为生产环境的安全性和可靠性做了大量工程。
+
+**LangChain 的哲学**：万物皆可组合。`StateGraph` + `Node` + `Edge` 的声明式 API 让复杂 workflow 有清晰的可视化表达，但学习成本最高。
+
+**Vercel AI SDK 的哲学**：前端开发者友好。`streamText()` / `generateText()` 一行代码完成 Agent 调用，React hooks 直接绑定流式输出。
+
+---
+
+## 7.2 核心循环对比
+
+### 三种循环范式
+
+Agent 的核心循环是整个架构的心脏。四个框架用了三种根本不同的范式：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Pi / Claude Code: 显式 while 循环                           │
+│  ─────────────────────────────────────────────────────       │
+│  while (true) {                                              │
+│    response = await llm.call(messages);                      │
+│    if (response.stop_reason === "end_turn") break;           │
+│    results = await executeTools(response.tool_calls);        │
+│    messages.push(...results);                                │
+│  }                                                           │
+├──────────────────────────────────────────────────────────────┤
+│  LangChain: 声明式 StateGraph                                │
+│  ─────────────────────────────────────────────────────       │
+│  graph = StateGraph()                                        │
+│    .addNode("llm", callLLM)                                  │
+│    .addNode("tools", executeTools)                            │
+│    .addConditionalEdge("llm", shouldContinue)                │
+│    .addEdge("tools", "llm")                                  │
+│  graph.compile().invoke(state)                               │
+├──────────────────────────────────────────────────────────────┤
+│  Vercel AI SDK: 隐式循环                                     │
+│  ─────────────────────────────────────────────────────       │
+│  const result = await streamText({                           │
+│    model, prompt, tools, maxSteps: 10                        │
+│  });                                                         │
+│  // 循环在内部，你看不到也不需要看                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Pi vs Vercel：控制 vs 便捷
+
+<CodeComparison
+  client:visible
+  left={{
+    label: "Pi 风格：显式控制",
+    language: "typescript",
+    code: `// 你控制循环的每一步
+while (true) {
+  const stream = api.stream(model, context);
+
+  for await (const event of stream) {
+    emit("message_update", event);
+  }
+
+  const message = await stream.result;
+
+  if (message.stopReason === "end_turn") {
+    emit("done", message);
+    break;
+  }
+
+  const results = await Promise.all(
+    message.toolCalls.map(tc =>
+      executeTool(tc)
+    )
+  );
+
+  messages.push(message, ...results);
+}`,
+  }}
+  right={{
+    label: "Vercel AI SDK 风格：一行搞定",
+    language: "typescript",
+    code: `// 框架替你管循环
+const result = await streamText({
+  model: anthropic("claude-sonnet-4-20250514"),
+  system: "You are a coding assistant.",
+  prompt: userInput,
+  tools: {
+    readFile: {
+      description: "Read a file",
+      parameters: z.object({
+        path: z.string()
+      }),
+      execute: async ({ path }) => {
+        return fs.readFileSync(path, "utf-8");
+      },
+    },
+  },
+  maxSteps: 10,
+});
+
+for await (const chunk of result.textStream) {
+  process.stdout.write(chunk);
+}`,
+  }}
+/>
+
+### LangChain 的 StateGraph 范式
+
+LangChain 的核心循环不是 `while` 循环，而是一个 **有向图**。这是一种根本不同的思维模型：
+
+<SourceReader
+  client:visible
+  code={`// LangChain StateGraph — 声明式定义执行流
+const graph = new StateGraph()
+  .addNode("llm_call", (state) => {
+    // Node 1: 调用 LLM
+    const response = await llm.invoke(state.messages);
+    return { ...state, lastResponse: response };
+  })
+  .addNode("tool_exec", (state) => {
+    // Node 2: 执行工具
+    const results = executeTools(state.lastResponse.toolCalls);
+    return { ...state, messages: [...state.messages, ...results] };
+  })
+  .setEntryPoint("llm_call")
+  .addEdge("llm_call", "tool_exec")
+  .addConditionalEdge("tool_exec", (state) =>
+    state.lastResponse.stopReason === "end_turn"
+      ? "__end__"
+      : "llm_call"    // 循环回 LLM
+  );
+
+// 编译并执行 — 图引擎驱动循环
+const result = graph.compile().invoke(initialState);`}
+  filename="demos/07-comparison/src/langchain-style.ts (概念)"
+  language="typescript"
+  startLine={1}
+  highlights={[
+    { line: 2, note: "声明式 — 你定义节点和边，而非写循环" },
+    { line: 13, note: "条件边 — 图引擎根据状态决定下一步" },
+    { line: 18, note: "compile() + invoke() — 图描述和执行分离" }
+  ]}
+/>
+
+**StateGraph 的优势**：复杂 workflow（多分支、条件路由、并行执行）在图中表达比嵌套 `if/else` 更清晰。LangGraph Studio 可以可视化执行路径。
+
+**StateGraph 的代价**：简单场景过度工程化。一个基础的 ReAct 循环需要定义节点、边、条件函数、状态类型 —— 概念量是 `while` 循环的 3-4 倍。
+
+### 对比总结
+
+| 维度 | Pi（显式循环） | LangChain（StateGraph） | Vercel AI（隐式循环） |
+|------|-------------|---------------------|-------------------|
+| **可读性** | 最高 — 代码即流程 | 中 — 需理解图概念 | 高 — 但内部不可见 |
+| **可控性** | 最高 — 每步可干预 | 高 — 可定义复杂路由 | 低 — maxSteps 是唯一旋钮 |
+| **复杂 workflow** | 需手写逻辑 | 原生支持 | 不支持 |
+| **调试** | 直接 — 断点即可 | 需图可视化工具 | 困难 — 内部黑盒 |
+| **适合场景** | 学习、定制 | 复杂多步 workflow | 快速集成 |
+
+---
+
+## 7.3 工具/流式/Provider 逐维对比
+
+### 工具系统对比
+
+| 维度 | Pi | Claude Code | LangChain | Vercel AI SDK |
+|------|-----|-------------|-----------|---------------|
+| **Schema 定义** | TypeBox（运行时+编译时） | JSON Schema | Pydantic / Zod | Zod |
+| **验证** | AJV 运行时验证 | 内置验证 | Pydantic 验证 | Zod 验证 |
+| **并行执行** | `Promise.all` + 源序保序 | 并行执行 | 图节点并行 | `maxSteps` 内自动 |
+| **钩子系统** | `beforeToolCall` / `afterToolCall` | Permission system | Callbacks | `onStepFinish` |
+| **流式结果** | `onUpdate` 回调 | 工具输出实时更新 | Streaming callbacks | `onChunk` |
+| **可插拔后端** | Operations 模式 | 固定实现 | 自定义 Tool 类 | `execute` 函数 |
+| **UI 渲染** | `renderCall` / `renderResult` | 内置渲染器 | 无内置 UI | React hooks |
+
+**Pi 的独特设计**：
+
+1. **Operations 模式**（第 3 章）—— 工具的执行逻辑通过 `Operations` 接口注入，同一个 `bash` 工具可以在本地、Docker、远程服务器上执行，只需切换 Operations 实现。这比 LangChain 的继承或 Vercel 的函数替换更灵活。
+
+2. **源序保序**（第 3 章）—— `Promise.all` 并行执行但结果按源码顺序排列，保证 LLM 的上下文连贯性。这个细节其他框架都没有处理。
+
+3. **`renderCall` / `renderResult`**（第 8 章扩展）—— 工具不只定义执行逻辑，还定义 TUI 中的渲染方式。这是 Pi 作为"完整产品"而非"库"的体现。
+
+### 流式处理对比
+
+| 维度 | Pi | Claude Code | LangChain | Vercel AI SDK |
+|------|-----|-------------|-----------|---------------|
+| **核心抽象** | `EventStream<T, R>` 推拉模型 | SSE + 内部流 | Callback 链 | `StreamableValue` |
+| **事件粒度** | 13 种 `AssistantMessageEvent` | token/tool/thinking | 粗粒度回调 | text/tool_call/finish |
+| **前端集成** | TUI 组件系统 | Web UI | LangServe | React hooks (`useChat`) |
+| **代理传输** | Proxy（bandwidth 优化） | 无 | LangServe HTTP | 无 |
+| **Thinking 流式** | `thinking_delta` 事件 | 内置支持 | 无原生支持 | 部分支持 |
+| **JSON 增量解析** | 流式 JSON 构建（partial parse） | 无 | 无 | 无 |
+| **双消费模式** | `for await` + `.result` | 单一消费 | 单一回调 | 单一流 |
+
+**Pi 的独特设计**：
+
+1. **`EventStream<T, R>` 双消费**（第 4 章）—— 同一个流既可以 `for await` 逐事件消费（实时 UI），又可以 `await stream.result` 获取最终结果（逻辑层）。其他框架需要两个不同的 API。
+
+2. **Proxy 带宽优化**（第 4 章）—— Pi 的 Proxy 模式不只是转发 SSE，还会在服务端聚合 token、压缩传输。对于高延迟或低带宽场景，这是生产级的优化。
+
+3. **13 种事件类型**（第 4 章）—— `content_start`、`content_delta`、`content_end`、`tool_use_start`、`tool_use_delta`、`tool_use_end`、`thinking_start`、`thinking_delta`、`thinking_end`、`signature`、`usage`、`stop`、`error`。这是所有框架中粒度最细的事件协议。
+
+### Provider 抽象对比
+
+| 维度 | Pi | Claude Code | LangChain | Vercel AI SDK |
+|------|-----|-------------|-----------|---------------|
+| **Provider 数量** | 6+（Anthropic/OpenAI/Google/Bedrock/Azure/Ollama...） | 主要 Anthropic | 30+ | 10+ |
+| **跨 Provider 消息转换** | `transformMessages` 三阶段管道 | 内置转换 | 各 Provider 独立处理 | Provider 适配器 |
+| **Thinking 统一** | ThinkingLevel → Provider 映射表 | 无需统一（单 Provider） | 无统一方案 | 无统一方案 |
+| **成本追踪** | `calculateCost` 内置 | 内置显示 | 第三方集成 | 无 |
+| **Auth 方式** | API Key + OAuth PKCE | API Key + OAuth | API Key | API Key |
+| **注册模式** | `registerProvider` + sourceId 生命周期 | 内置 | 继承 BaseChatModel | `createProvider` |
+
+**Pi 的独特设计**：
+
+1. **`transformMessages` 三阶段管道**（第 5 章）—— 内容转换 → ID 映射 → 孤儿修复。这套管道让 Anthropic 格式的消息可以无缝发送给 OpenAI 或 Google 的 API，反之亦然。
+
+2. **ThinkingLevel 统一**（第 5 章）—— 用一个 6 级枚举（off/minimal/low/medium/high/xhigh）统一了 Anthropic 的 budget token 和 OpenAI 的 reasoning effort，虽然不完美但足够实用。
+
+3. **sourceId 生命周期**（第 5 章）—— `registerProvider` 返回的 sourceId 可以在扩展卸载时用于精确卸载注册的 Provider，避免内存泄漏。
+
+---
+
+## 7.4 通用设计模式
+
+### 5 个所有 Agent 框架共享的模式
+
+通过对比四个框架，我们可以提炼出 Agent 开发的 **通用设计模式** —— 不管用哪个框架，这些模式都是必须的：
+
+#### 模式 1：Agent Loop（循环核心）
+
+```
+while (任务未完成) {
+  response = LLM(messages)
+  if (response 是最终回复) → 结束
+  if (response 包含工具调用) → 执行工具 → 结果追加到 messages
+}
+```
+
+**共识**：所有 Agent 都是这个循环的变体。Pi 用显式 `while`，LangChain 用图遍历，Vercel 用 `maxSteps` 隐式循环 —— 但本质相同。
+
+**分歧**：循环的透明度。Pi/Claude Code 让你看到循环的每一步；Vercel 把循环藏在 SDK 内部；LangChain 用图抽象重新定义循环。
+
+#### 模式 2：Tool Abstraction（工具抽象）
+
+```
+Tool = Schema（告诉 LLM 怎么调用）+ Execute（实际执行逻辑）
+```
+
+**共识**：所有框架都将工具分为"声明"和"执行"两部分。Schema 发给 LLM，execute 在本地运行。
+
+**分歧**：Schema 语言（TypeBox vs Zod vs Pydantic vs JSON Schema）、验证时机（调用前 vs 框架自动）、流式结果支持。
+
+#### 模式 3：Context Management（上下文管理）
+
+```
+messages: Message[] = [system, user, assistant, tool_result, ...]
+```
+
+**共识**：所有框架都维护一个消息数组作为 LLM 的上下文。消息类型分为 system、user、assistant、tool_result 四种。
+
+**分歧**：上下文压缩策略（Pi 用 LLM 生成摘要、Claude Code 类似、LangChain 需手动实现）、消息格式统一（Pi 的 `transformMessages` 是最完整的方案）。
+
+#### 模式 4：Streaming（流式传输）
+
+```
+for await (const event of stream) {
+  updateUI(event);   // 实时反馈
+}
+const result = await stream.finalResult;  // 最终结果
+```
+
+**共识**：所有框架都支持流式输出。用户期望实时看到 LLM 的回复，而非等待整个响应完成。
+
+**分歧**：事件粒度（Pi 13 种 vs Vercel 3 种）、消费模式（Pi 双消费 vs 其他单消费）、Thinking 流式（Pi 原生支持 vs 其他部分支持）。
+
+#### 模式 5：Provider Abstraction（Provider 抽象）
+
+```
+api.stream(model, context) → EventStream  // 屏蔽底层差异
+```
+
+**共识**：所有框架都需要一个 Provider 层来屏蔽不同 LLM API 的差异。Model ID → Provider → API 调用。
+
+**分歧**：抽象深度（Pi 的三层分离 vs Vercel 的薄 adapter）、跨 Provider 兼容性（Pi 最完整）、热切换支持（Pi 原生支持）。
+
+### Pi 的独特贡献
+
+除了上述通用模式，Pi 还贡献了几个独特的设计：
+
+**1. Steering / Follow-up 消息模式**
+
+Pi 允许在 LLM 流式输出过程中发送新的用户消息。这不是简单的"中断"——而是两种模式的选择：
+
+- **Steering（引导）**：消息注入当前对话上下文，LLM 在当前回复中就会考虑
+- **Follow-up（追问）**：消息排队等待当前回复结束后触发新一轮对话
+
+其他框架要么不支持中间插入消息，要么需要手动管理消息队列。
+
+**2. 可插拔 Operations**
+
+Pi 的 `bash` 工具不直接调用 `child_process.exec`，而是通过 `Operations` 接口：
+
+```typescript
+interface BashOperations {
+  execute(command: string, options: ExecOptions): Promise<ExecResult>;
+}
+```
+
+这让同一个工具定义可以在本地、Docker、SSH 远程、甚至浏览器沙箱中执行。切换执行环境只需替换 Operations 实现，无需改工具代码。
+
+**3. 并行执行 + 源序保序**
+
+```typescript
+// Pi: 并行执行但结果按源码顺序排列
+const results = await Promise.all(toolCalls.map(tc => execute(tc)));
+// results[0] 对应 toolCalls[0]，即使 toolCalls[1] 先完成
+```
+
+这保证了 LLM 收到的工具结果顺序与它请求的顺序一致，避免上下文混乱。
+
+**4. Proxy 带宽优化**
+
+Pi 的 Proxy 模式在服务端聚合 SSE 事件：
+
+```
+无 Proxy: 每个 token 一个 SSE 事件 → 大量 HTTP 开销
+有 Proxy: 服务端缓冲 → 批量发送 → 减少 60-80% 带宽
+```
+
+对于 Web UI 或远程部署场景，这是实质性的优化。
+
+---
+
+## 7.5 动手：三种风格对比
+
+### Demo 07 架构
+
+Demo 07 用同一个任务（"读取文件，统计行数，报告结果"）分别用三种风格实现，让你直接感受差异：
+
+```
+demos/07-comparison/src/
+├── pi-style.ts           ← 显式 while 循环 + 手动事件
+├── langchain-style.ts    ← StateGraph + 节点 + 条件边
+└── vercel-ai-style.ts    ← streamText() 一行搞定
+```
+
+### 三种风格对比
+
+<CodeComparison
+  client:visible
+  left={{
+    label: "Pi 风格：显式循环 + 事件",
+    language: "typescript",
+    code: `// 你控制一切
+const tools = [
+  { name: "read_file",
+    description: "Read a file",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string" }
+      },
+      required: ["path"]
+    }},
+];
+
+// 事件系统
+on("tool_call", (d) => log(d.name));
+on("tool_result", (d) => log(d.result));
+
+// 显式循环
+while (step < plan.length) {
+  emit("tool_call", action);
+  result = executeTool(
+    action.tool, action.input
+  );
+  emit("tool_result", { result });
+  step++;
+}`,
+  }}
+  right={{
+    label: "LangChain 风格：声明式图",
+    language: "typescript",
+    code: `// 你定义图结构
+const graph = new StateGraph()
+  .addNode("llm_call", (state) => {
+    state.toolCalls.push({
+      name: "read_file",
+      input: { path: "data.txt" }
+    });
+    return state;
+  })
+  .addNode("tool_exec", (state) => {
+    const call = state.toolCalls.at(-1);
+    state.currentResult =
+      executeTool(call);
+    return state;
+  })
+  .setEntryPoint("llm_call")
+  .addEdge("llm_call", "tool_exec")
+  .addConditionalEdge("tool_exec",
+    (s) => s.done
+      ? "__end__" : "llm_call"
+  );
+
+// 图引擎驱动执行
+const result =
+  graph.compile().invoke(state);`,
+  }}
+/>
+
+**Vercel AI SDK 风格：一行调用**
+
+```typescript
+const result = await streamText({
+  model: "claude-sonnet-4-20250514",
+  system: "You are a file assistant.",
+  prompt: "Read data.txt, count lines",
+  tools: {
+    readFile: {
+      description: "Read a file",
+      parameters: { path: { type: "string" } },
+      execute: async () => "line 1\nline 2\nline 3\n",
+    },
+  },
+  maxSteps: 5,
+});
+console.log(result.text);
+```
+
+### 运行 Demo 07
+
+```bash
+cd demos/07-comparison && npm install
+
+# 分别运行三种风格
+npx tsx src/pi-style.ts
+npx tsx src/langchain-style.ts
+npx tsx src/vercel-ai-style.ts
+```
+
+观察输出差异：
+- **Pi 风格**：你看到每个事件（`LOOP_START`、`TOOL_CALL`、`TOOL_RESULT`、`DONE`）
+- **LangChain 风格**：你看到图节点的遍历过程（`GRAPH_NODE: llm_call → tool_exec → ...`）
+- **Vercel 风格**：你只看到最终结果和步骤数
+
+<VideoEmbed
+  client:visible
+  src="/videos/v24-comparison.mp4"
+  title="V24: 三种框架风格对比运行"
+  caption="同一个任务，三种实现风格，不同的控制粒度"
+/>
+
+---
+
+## 7.6 何时选择什么框架
+
+### 场景导向的选择
+
+没有"最好的框架"，只有"最适合场景的框架"：
+
+| 场景 | 推荐框架 | 原因 |
+|------|---------|------|
+| **学习 Agent 原理** | Pi | 代码量最小，每行都可读，三层架构清晰 |
+| **快速集成前端** | Vercel AI SDK | React hooks、Next.js 无缝集成 |
+| **复杂 workflow** | LangChain | StateGraph 天然支持多分支、并行、条件路由 |
+| **生产级 coding agent** | Claude Code / Pi | 完整的工具链、安全机制、会话管理 |
+| **深度定制** | Pi | 每层可替换、扩展系统灵活、Operations 可插拔 |
+| **多模型支持** | Pi / LangChain | 跨 Provider 消息转换、Thinking 统一 |
+| **企业部署** | Claude Code | OAuth、权限系统、sandbox、审计 |
+
+### 组合使用
+
+这些框架并非互斥。一个常见的组合：
+
+```
+前端: Vercel AI SDK (React hooks + streamText)
+  ↓ HTTP / SSE
+中间层: Pi 的 Provider 抽象 (transformMessages + 多 Provider)
+  ↓ API 调用
+后端: Pi 的 Agent 核心 (agentic loop + tool execution)
+  ↓ 扩展系统
+插件: 用 Pi 扩展系统注册自定义工具和事件处理
+```
+
+---
+
+## 7.7 本章小结
+
+### 核心要点
+
+1. **没有"最好"的框架** —— 只有最适合当前场景的框架。Pi 适合学习和定制，Vercel 适合快速集成，LangChain 适合复杂 workflow，Claude Code 适合生产环境
+
+2. **5 个通用模式** —— Agent Loop、Tool Abstraction、Context Management、Streaming、Provider Abstraction。不管用什么框架，理解这 5 个模式就能快速上手任何新框架
+
+3. **Pi 的独特贡献** —— Steering/Follow-up 消息模式、可插拔 Operations、并行执行源序保序、Proxy 带宽优化。这些设计在其他框架中找不到，值得学习和借鉴
+
+4. **理解设计取舍** —— 每个框架都在简洁性与功能性、控制与便捷、透明与封装之间做了不同的取舍。没有对错，只有适合
+
+### 架构思维
+
+学会对比分析框架后，你获得的不仅是"会用几个框架"，而是一种 **架构思维**：
+
+- 看到 `while` 循环，你知道它是 Agent Loop 模式
+- 看到 `Schema + execute`，你知道它是 Tool Abstraction 模式
+- 看到 `messages.push()`，你知道它是 Context Management 模式
+- 看到 `for await...of`，你知道它是 Streaming 模式
+- 看到 `provider.stream()`，你知道它是 Provider Abstraction 模式
+
+有了这些模式识别能力，你可以快速读懂任何新的 Agent 框架 —— 甚至设计自己的框架。
+
+### 下一章预告
+
+下一章我们将进入 **进阶扩展** —— 探索 Pi 的扩展系统、TUI 架构、Skills、Web UI、以及产品化考量。这些是把一个 Agent 从"能用"推向"好用"的关键能力。

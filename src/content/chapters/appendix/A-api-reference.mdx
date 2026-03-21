@@ -1,0 +1,191 @@
+---
+title: "附录 A：Pi API 速查"
+chapter: 90
+description: "Pi 三层 API 的完整速查手册"
+---
+
+# Pi API 速查手册
+
+Pi 的 API 分为三层：底层 LLM 通信（`pi-ai`）、Agent 核心循环（`pi-agent-core`）、以及上层 Coding Agent SDK（`pi-coding-agent`）。本附录按层级整理所有公开 API。
+
+---
+
+## pi-ai — LLM 通信层
+
+### 核心函数
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `stream()` | `(model, messages, options?) → EventStream<AssistantMessageEvent, AssistantMessage>` | 流式调用模型，返回可迭代的事件流 |
+| `complete()` | `(model, messages, options?) → Promise<AssistantMessage>` | 非流式调用，等待完整响应 |
+| `streamSimple()` | `(model, prompt, options?) → EventStream<AssistantMessageEvent, string>` | 简化版流式调用，输入/输出均为纯文本 |
+| `completeSimple()` | `(model, prompt, options?) → Promise<string>` | 简化版非流式调用，输入/输出均为纯文本 |
+| `getModel()` | `(provider, modelId) → Model` | 获取指定 provider 下的模型实例 |
+| `getProviders()` | `() → Provider[]` | 列出所有已注册的 provider |
+
+### 核心类型
+
+| 类型 | 说明 |
+|------|------|
+| `Model<TApi>` | 模型实例，包含 id、provider、api 类型、上下文窗口大小等元信息 |
+| `Message` | 消息联合类型，见下方子类型 |
+| `UserMessage` | 用户消息，包含 `content: ContentBlock[]` |
+| `AssistantMessage` | 助手消息，包含 `content: ContentBlock[]`、`stopReason`、`usage` |
+| `ToolResultMessage` | 工具结果消息，包含 `toolResults: ToolResult[]` |
+| `Tool<TSchema>` | 工具定义：`name`、`description`、`schema`（TypeBox）、`execute` |
+| `Context` | 上下文对象：`messages`、`system`、`tools`、`model` |
+| `StreamOptions` | 流式选项：`signal`、`onEvent`、`thinking`、`maxTokens` 等 |
+| `AssistantMessageEvent` | 流事件联合类型（见下表） |
+| `EventStream<T, R>` | 异步可迭代流，`T` 为事件类型，`R` 为最终结果类型 |
+
+### AssistantMessageEvent 事件类型
+
+| 事件 | 触发时机 |
+|------|---------|
+| `content_block_start` | 新内容块开始（text / thinking / tool_use） |
+| `content_block_delta` | 内容块增量更新 |
+| `content_block_stop` | 内容块结束 |
+| `message_start` | 消息开始 |
+| `message_delta` | 消息级增量（stopReason、usage） |
+| `message_stop` | 消息结束 |
+
+### ContentBlock 类型
+
+| 类型 | 字段 | 说明 |
+|------|------|------|
+| `TextBlock` | `type: "text"`, `text` | 文本内容块 |
+| `ThinkingBlock` | `type: "thinking"`, `thinking` | 思考过程块 |
+| `ToolUseBlock` | `type: "tool_use"`, `id`, `name`, `input` | 工具调用块 |
+| `ImageBlock` | `type: "image"`, `source` | 图片内容块 |
+
+---
+
+## pi-agent-core — Agent 核心层
+
+### Agent 类
+
+**构造函数：**
+
+```typescript
+new Agent(options: {
+  model: Model;
+  systemPrompt?: string;
+  tools?: AgentTool[];
+  thinkingLevel?: ThinkingLevel;
+  transformContext?: (ctx: Context) => Context;
+  maxTurns?: number;
+})
+```
+
+**公开方法：**
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `prompt()` | `(input: string \| Message[]) → EventStream<AgentEvent, AgentState>` | 发送用户输入，启动 agent 循环 |
+| `continue()` | `() → EventStream<AgentEvent, AgentState>` | 在上次停止处继续循环 |
+| `abort()` | `() → void` | 中止当前循环 |
+| `waitForIdle()` | `() → Promise<AgentState>` | 等待当前循环完成 |
+| `setSystemPrompt()` | `(prompt: string) → void` | 更新系统提示词 |
+| `setModel()` | `(model: Model) → void` | 切换模型 |
+| `setThinkingLevel()` | `(level: ThinkingLevel) → void` | 设置思考级别 |
+| `setTools()` | `(tools: AgentTool[]) → void` | 替换工具集 |
+| `subscribe()` | `(handler: (event: AgentEvent) → void) → Unsubscribe` | 订阅事件 |
+| `steer()` | `(instruction: string) → void` | 在循环运行中注入引导指令 |
+| `followUp()` | `(input: string) → EventStream<AgentEvent, AgentState>` | 追加用户输入并继续循环 |
+| `replaceMessages()` | `(messages: Message[]) → void` | 替换全部消息历史 |
+| `appendMessage()` | `(message: Message) → void` | 追加一条消息 |
+| `clearMessages()` | `() → void` | 清空消息历史 |
+| `reset()` | `() → void` | 重置全部状态（消息 + 配置） |
+
+**只读属性：**
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `state` | `AgentState` | 当前状态（`idle` / `running` / `aborted`） |
+| `messages` | `Message[]` | 完整消息历史 |
+| `model` | `Model` | 当前模型 |
+| `tools` | `AgentTool[]` | 当前工具集 |
+
+### 独立函数
+
+| 函数 | 说明 |
+|------|------|
+| `agentLoop(model, messages, options)` | 无状态版 agent 循环，运行一次完整的 ReAct 循环 |
+| `agentLoopContinue(model, messages, options)` | 从已有消息历史继续循环 |
+
+### AgentEvent 类型
+
+| 事件 | 说明 |
+|------|------|
+| `turn_start` | 新一轮循环开始 |
+| `turn_end` | 一轮循环结束 |
+| `message_start` | LLM 消息开始 |
+| `message_end` | LLM 消息结束 |
+| `text_delta` | 文本增量 |
+| `thinking_delta` | 思考增量 |
+| `tool_use_start` | 工具调用开始 |
+| `tool_use_end` | 工具调用结束，包含结果 |
+| `tool_error` | 工具执行出错 |
+| `compaction` | 上下文压缩发生 |
+| `error` | 循环级错误 |
+| `abort` | 循环被中止 |
+
+### 关键类型
+
+| 类型 | 说明 |
+|------|------|
+| `AgentTool` | 扩展自 `Tool`，增加 `isEnabled?`、`requiresConfirmation?` |
+| `AgentToolResult` | 工具执行结果：`toolUseId`、`output`、`isError` |
+| `AgentState` | `"idle" \| "running" \| "aborted"` |
+| `ThinkingLevel` | `"none" \| "low" \| "medium" \| "high"` |
+
+---
+
+## pi-coding-agent — Coding Agent SDK
+
+### 核心函数
+
+| 函数 | 说明 |
+|------|------|
+| `createAgentSession(options)` | 创建一个完整的 coding agent 会话，返回 `AgentSession` |
+
+### 工具工厂
+
+| 工厂函数 | 创建的工具 | 说明 |
+|----------|-----------|------|
+| `createBashTool(options)` | `bash` | 执行 shell 命令 |
+| `createReadTool(options)` | `read` | 读取文件内容 |
+| `createWriteTool(options)` | `write` | 写入文件 |
+| `createEditTool(options)` | `edit` | 编辑文件（搜索替换） |
+| `createGlobTool(options)` | `glob` | 文件名模式搜索 |
+| `createGrepTool(options)` | `grep` | 文件内容搜索 |
+| `createLspTool(options)` | `lsp` | LSP 语言服务操作 |
+| `createNotebookTool(options)` | `notebook` | Jupyter notebook 操作 |
+| `createFetchTool(options)` | `fetch` | HTTP 请求 |
+
+### ExtensionAPI
+
+| 方法 | 说明 |
+|------|------|
+| `registerTool(tool)` | 注册自定义工具 |
+| `registerPrompt(prompt)` | 注册提示词模板 |
+| `registerSkill(skill)` | 注册技能（slash command） |
+| `onEvent(handler)` | 监听 agent 事件 |
+
+---
+
+## 常用导入路径
+
+```typescript
+// LLM 通信层
+import { stream, complete, getModel, getProviders } from "pi-ai";
+import type { Model, Message, Tool, EventStream } from "pi-ai";
+
+// Agent 核心层
+import { Agent, agentLoop } from "pi-agent-core";
+import type { AgentEvent, AgentTool, ThinkingLevel } from "pi-agent-core";
+
+// Coding Agent SDK
+import { createAgentSession, createBashTool, createReadTool } from "pi-coding-agent";
+import type { ExtensionAPI } from "pi-coding-agent";
+```
