@@ -1,0 +1,1043 @@
+---
+title: "流式与事件"
+chapter: 4
+description: "理解 EventStream 双消费模式，完整事件生命周期，Proxy 传输层，流式 JSON 解析"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+import VideoEmbed from '../../components/tutorial/VideoEmbed';
+
+# 流式与事件
+
+本章目标：深入理解 Pi 的流式事件系统 —— 从底层的 `EventStream` 推拉模型、13 种 `AssistantMessageEvent` 事件协议、12 种 `AgentEvent` 生命周期事件，到流式 JSON 增量解析和 Proxy 传输层的带宽优化。掌握这些后，你就理解了数据从 LLM 到 UI 的完整传输管道。
+
+---
+
+## 4.1 EventStream 核心
+
+### 问题：异步生产者与消费者如何协调？
+
+LLM 的流式响应是一个典型的 "生产者-消费者" 问题：LLM 以不可控的速率产出 token，UI 需要按自己的节奏消费。同时，使用者可能需要两种消费模式：逐事件处理（实时 UI 更新）或等待最终结果（获取完整消息）。
+
+Pi 通过 `EventStream<T, R>` 泛型类解决这个问题。`T` 是事件类型，`R` 是最终结果类型。
+
+### 源码解析
+
+<SourceReader
+  client:visible
+  code={`export class EventStream<T, R = T> implements AsyncIterable<T> {
+  private queue: T[] = [];
+  private waiting: ((value: IteratorResult<T>) => void)[] = [];
+  private done = false;
+  private finalResultPromise: Promise<R>;
+  private resolveFinalResult!: (result: R) => void;
+
+  constructor(
+    private isComplete: (event: T) => boolean,
+    private extractResult: (event: T) => R,
+  ) {
+    this.finalResultPromise = new Promise((resolve) => {
+      this.resolveFinalResult = resolve;
+    });
+  }
+
+  push(event: T): void {
+    if (this.done) return;
+
+    if (this.isComplete(event)) {
+      this.done = true;
+      this.resolveFinalResult(this.extractResult(event));
+    }
+
+    // Deliver to waiting consumer or queue it
+    const waiter = this.waiting.shift();
+    if (waiter) {
+      waiter({ value: event, done: false });
+    } else {
+      this.queue.push(event);
+    }
+  }
+
+  end(result?: R): void {
+    this.done = true;
+    if (result !== undefined) {
+      this.resolveFinalResult(result);
+    }
+    // Notify all waiting consumers that we're done
+    while (this.waiting.length > 0) {
+      const waiter = this.waiting.shift()!;
+      waiter({ value: undefined as any, done: true });
+    }
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<T> {
+    while (true) {
+      if (this.queue.length > 0) {
+        yield this.queue.shift()!;
+      } else if (this.done) {
+        return;
+      } else {
+        const result = await new Promise<IteratorResult<T>>(
+          (resolve) => this.waiting.push(resolve)
+        );
+        if (result.done) return;
+        yield result.value;
+      }
+    }
+  }
+
+  result(): Promise<R> {
+    return this.finalResultPromise;
+  }
+}`}
+  filename="packages/ai/src/utils/event-stream.ts"
+  language="typescript"
+  startLine={4}
+  highlights={[
+    { line: 5, note: "queue: 缓冲区 — 生产者快于消费者时暂存事件" },
+    { line: 6, note: "waiting: 等待者队列 — 消费者快于生产者时挂起的 resolve 回调" },
+    { line: 13, note: "isComplete: 终止条件谓词 — 由事件流的语义决定" },
+    { line: 14, note: "extractResult: 从终止事件中提取最终结果" },
+    { line: 21, note: "push 时先检查 done — 流结束后忽略所有后续事件" },
+    { line: 23, note: "遇到终止事件立即 resolve finalResultPromise" },
+    { line: 28, note: "有等待者则直接交付（零拷贝），否则入队缓冲" },
+    { line: 49, note: "AsyncIterator 三分支逻辑：有缓存 → yield；已结束 → return；否则 → 挂起等待" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/ai/src/utils/event-stream.ts#L4"
+/>
+
+### Queue + Waiter 推拉机制
+
+这个设计的核心在于 `push` 和 `[Symbol.asyncIterator]` 的对称协作：
+
+```
+场景 A：生产者先到（push 快于消费）
+  push(event)
+    → waiting 为空
+    → event 入 queue
+  next() 被调用
+    → queue 有数据
+    → 直接 yield queue.shift()
+
+场景 B：消费者先到（消费快于 push）
+  next() 被调用
+    → queue 为空且未 done
+    → 创建 Promise，resolve 存入 waiting
+    → 消费者挂起等待
+  push(event) 被调用
+    → waiting 非空
+    → 取出 resolve 直接交付 event
+    → 消费者恢复执行
+```
+
+**关键洞察**：`queue` 和 `waiting` 永远不会同时非空。要么有待消费的事件（queue 非空），要么有等待事件的消费者（waiting 非空），这是推拉对偶的自然结果。
+
+### 双消费模式
+
+`EventStream` 支持两种互不冲突的消费方式：
+
+```typescript
+// 方式 1：for-await-of 逐事件消费（实时 UI 更新）
+const stream = streamFunction(model, context, options);
+for await (const event of stream) {
+  switch (event.type) {
+    case "text_delta":
+      process.stdout.write(event.delta); // 实时输出
+      break;
+    case "done":
+      console.log("完成:", event.reason);
+      break;
+  }
+}
+
+// 方式 2：await result() 直接等待最终结果（跳过中间过程）
+const stream2 = streamFunction(model, context, options);
+const finalMessage = await stream2.result(); // 阻塞直到 done/error
+console.log(finalMessage.content);
+```
+
+**方式 1** 适合 UI 场景：逐 delta 渲染打字机效果。**方式 2** 适合后台场景：不关心中间过程，只要最终结果。两种方式可以组合使用 —— 先用 for-await 迭代完所有事件，再用 `result()` 获取最终消息。
+
+### AssistantMessageEventStream 特化
+
+<SourceReader
+  client:visible
+  code={`export class AssistantMessageEventStream
+  extends EventStream<AssistantMessageEvent, AssistantMessage> {
+  constructor() {
+    super(
+      (event) => event.type === "done" || event.type === "error",
+      (event) => {
+        if (event.type === "done") {
+          return event.message;
+        } else if (event.type === "error") {
+          return event.error;
+        }
+        throw new Error("Unexpected event type for final result");
+      },
+    );
+  }
+}`}
+  filename="packages/ai/src/utils/event-stream.ts"
+  language="typescript"
+  startLine={68}
+  highlights={[
+    { line: 72, note: "终止条件：done 或 error — 两种方式都结束流" },
+    { line: 74, note: "done → 提取成功的 message 作为最终结果" },
+    { line: 76, note: "error → 提取 error（也是 AssistantMessage，但 stopReason 为 error/aborted）" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/ai/src/utils/event-stream.ts#L68"
+/>
+
+注意 `error` 事件携带的也是一个 `AssistantMessage`，只是 `stopReason` 为 `"error"` 或 `"aborted"`，并附有 `errorMessage`。这意味着即使出错，**已经收到的部分内容仍然可用** —— abort 后的消息内容可以继续用于 UI 展示或日志记录。
+
+---
+
+## 4.2 AssistantMessageEvent 全景
+
+### 13 种事件类型
+
+`AssistantMessageEvent` 定义了 LLM 流式响应的完整事件协议。每个 provider adapter（Anthropic、OpenAI 等）都将原始 API 的事件转换为这套统一协议：
+
+<SourceReader
+  client:visible
+  code={`export type AssistantMessageEvent =
+  | { type: "start"; partial: AssistantMessage }
+  | { type: "text_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
+  | { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
+  | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
+  | { type: "done"; reason: Extract<StopReason, "stop" | "length" | "toolUse">;
+      message: AssistantMessage }
+  | { type: "error"; reason: Extract<StopReason, "aborted" | "error">;
+      error: AssistantMessage };`}
+  filename="packages/ai/src/types.ts"
+  language="typescript"
+  startLine={237}
+  highlights={[
+    { line: 238, note: "start: 流开始，partial 是初始空消息" },
+    { line: 239, note: "text_start/delta/end: 文本内容块的生命周期" },
+    { line: 242, note: "thinking_start/delta/end: 思维链内容块（extended thinking）" },
+    { line: 245, note: "toolcall_start/delta/end: 工具调用的增量构建" },
+    { line: 247, note: "toolcall_end 包含完整的 ToolCall 对象（name + arguments）" },
+    { line: 248, note: "done.reason: stop（自然结束）| length（达到 max_tokens）| toolUse（需要工具调用）" },
+    { line: 250, note: "error.reason: aborted（用户取消）| error（运行时错误）" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/ai/src/types.ts#L237"
+/>
+
+### 事件分组与语义
+
+这 13 种事件可以分为四组：
+
+| 分组 | 事件 | 语义 |
+|------|------|------|
+| **流控制** | `start` | 流开始，初始化 partial message |
+| **文本块** | `text_start` → `text_delta`(n) → `text_end` | 一个文本内容块的完整生命周期 |
+| **思维块** | `thinking_start` → `thinking_delta`(n) → `thinking_end` | 一个思维链内容块的完整生命周期 |
+| **工具调用块** | `toolcall_start` → `toolcall_delta`(n) → `toolcall_end` | 一个工具调用的参数增量构建 |
+| **终止** | `done` / `error` | 流结束，携带完整消息或错误 |
+
+### contentIndex：内容块的定位器
+
+每个非 start/done/error 事件都携带 `contentIndex`，它指向 `AssistantMessage.content[]` 数组中的位置。这是因为一次 LLM 响应可能包含多个内容块：
+
+```
+content[0]: thinking  (思维链)
+content[1]: text      (回复文本)
+content[2]: toolCall  (工具调用 1)
+content[3]: toolCall  (工具调用 2)
+```
+
+`contentIndex` 让消费者知道当前事件属于哪个内容块，无需维护额外的状态机。
+
+### Interleaved Thinking（交错思维）
+
+在某些模型（如 Claude）的 extended thinking 模式下，思维块和文本块可以交错出现：
+
+```
+thinking_start  (contentIndex=0)  ← 第一段思考
+thinking_delta  "Let me analyze..."
+thinking_end
+text_start      (contentIndex=1)  ← 开始回答
+text_delta      "Based on my analysis..."
+text_end
+thinking_start  (contentIndex=2)  ← 第二段思考（交错!）
+thinking_delta  "Wait, I should also consider..."
+thinking_end
+text_start      (contentIndex=3)  ← 补充回答
+text_delta      "Additionally..."
+text_end
+```
+
+`contentIndex` 的递增确保了即使事件交错，消费者仍能正确区分不同的内容块。
+
+### partial：累积状态快照
+
+每个中间事件都携带 `partial: AssistantMessage` —— 这是 **到目前为止已收到的所有内容的完整快照**。它不是 delta，而是全量。这个设计让 UI 渲染非常简单：
+
+```typescript
+for await (const event of stream) {
+  // 不需要自己维护累积状态
+  // event.partial 就是当前完整的 message 快照
+  renderMessage(event.partial);
+}
+```
+
+代价是每个事件都携带了完整的 partial 对象，增加了内存开销。但在客户端这通常不是问题，而 Proxy 场景下可以通过剥离 partial 来优化带宽（详见 4.5 节）。
+
+### Signatures：内容校验
+
+`text_end` 和 `thinking_end` 事件的 `content` 字段包含完整文本，同时 `AssistantMessage` 中的内容块支持 `textSignature` / `thinkingSignature` 字段。这些签名用于 Anthropic 的内容验证机制，确保返回的文本未被中间层篡改。
+
+### StopReason 完整语义
+
+| StopReason | 含义 | 后续动作 |
+|------------|------|----------|
+| `"stop"` | 模型自然结束 | 返回结果 |
+| `"length"` | 达到 max_tokens 限制 | 可能内容被截断 |
+| `"toolUse"` | 模型请求工具调用 | Agent 执行工具后继续循环 |
+| `"aborted"` | 用户或系统取消 | 清理资源，可用部分内容 |
+| `"error"` | 运行时错误 | 重试或报告错误 |
+
+---
+
+## 4.3 AgentEvent 生命周期
+
+`AssistantMessageEvent` 是 `pi-ai` 层的底层事件。`pi-agent-core` 在此基础上定义了 `AgentEvent` —— 一套更高层的生命周期事件，覆盖了 Agent 的完整运行过程。
+
+### 12 种 AgentEvent
+
+<SourceReader
+  client:visible
+  code={`export type AgentEvent =
+  // Agent lifecycle
+  | { type: "agent_start" }
+  | { type: "agent_end"; messages: AgentMessage[] }
+  // Turn lifecycle
+  | { type: "turn_start" }
+  | { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+  // Message lifecycle
+  | { type: "message_start"; message: AgentMessage }
+  | { type: "message_update"; message: AgentMessage;
+      assistantMessageEvent: AssistantMessageEvent }
+  | { type: "message_end"; message: AgentMessage }
+  // Tool execution lifecycle
+  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+  | { type: "tool_execution_update"; toolCallId: string; toolName: string;
+      args: any; partialResult: any }
+  | { type: "tool_execution_end"; toolCallId: string; toolName: string;
+      result: any; isError: boolean };`}
+  filename="packages/agent/src/types.ts"
+  language="typescript"
+  startLine={295}
+  highlights={[
+    { line: 296, note: "agent_start/end: 整个 Agent 运行的边界" },
+    { line: 299, note: "turn_start/end: 一个 turn = 一次 LLM 响应 + 可能的工具调用" },
+    { line: 302, note: "message_start/update/end: 消息级别事件，update 只在 assistant 流式响应中发出" },
+    { line: 304, note: "message_update 包裹了底层的 AssistantMessageEvent — 两层事件的桥接点" },
+    { line: 306, note: "tool_execution_start/update/end: 工具执行的独立生命周期" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/types.ts#L295"
+/>
+
+### 事件层级关系
+
+AgentEvent 形成三层嵌套结构：
+
+```
+agent_start
+  └─ turn_start
+       ├─ message_start (user prompt)
+       ├─ message_end   (user prompt)
+       ├─ message_start (assistant — 流式响应开始)
+       │    ├─ message_update (text_delta)
+       │    ├─ message_update (text_delta)
+       │    ├─ message_update (toolcall_start)
+       │    ├─ message_update (toolcall_delta)
+       │    └─ message_update (toolcall_end)
+       ├─ message_end   (assistant — 流式响应结束)
+       ├─ tool_execution_start
+       ├─ tool_execution_update (进度报告)
+       ├─ tool_execution_end
+       ├─ message_start (tool result)
+       ├─ message_end   (tool result)
+       └─ turn_end
+  └─ turn_start   (第二轮 — 工具结果送回 LLM)
+       ├─ message_start (assistant)
+       │    ├─ message_update (text_delta)
+       │    └─ ...
+       ├─ message_end (assistant)
+       └─ turn_end
+  └─ agent_end
+```
+
+### 完整时序图
+
+<VideoEmbed
+  client:visible
+  title="V12 · Event Timeline"
+  description="AgentEvent 完整时序图 — 无工具调用 vs 有工具调用两种场景"
+  duration="~20s"
+  compositionId="EventTimeline"
+/>
+
+**场景 A：纯文本响应（无工具调用）**
+
+```
+agent_start
+  turn_start
+    message_start  { user prompt }
+    message_end    { user prompt }
+    message_start  { assistant, partial }
+      message_update  { text_start }
+      message_update  { text_delta "Hello" }
+      message_update  { text_delta " world" }
+      message_update  { text_end }
+    message_end    { assistant, final, stopReason: "stop" }
+  turn_end       { message: assistant, toolResults: [] }
+agent_end        { messages: [user, assistant] }
+```
+
+**场景 B：带工具调用的响应**
+
+```
+agent_start
+  turn_start
+    message_start  { user prompt }
+    message_end    { user prompt }
+    message_start  { assistant, partial }
+      message_update  { text_delta "Let me search..." }
+      message_update  { toolcall_start }
+      message_update  { toolcall_delta '{"q' }
+      message_update  { toolcall_delta 'uery":"weather"}' }
+      message_update  { toolcall_end, toolCall: {...} }
+    message_end    { assistant, stopReason: "toolUse" }
+    tool_execution_start  { toolName: "search" }
+    tool_execution_end    { result: {...} }
+    message_start  { tool result }
+    message_end    { tool result }
+  turn_end
+  turn_start       ← 新的 turn: 工具结果送回 LLM
+    message_start  { assistant }
+      message_update  { text_delta "Based on the results..." }
+    message_end    { assistant, stopReason: "stop" }
+  turn_end
+agent_end
+```
+
+### message_update 是桥接点
+
+`message_update` 是连接两层事件系统的关键。它同时携带：
+- `message`: 当前 `AgentMessage` 的快照（供 UI 渲染）
+- `assistantMessageEvent`: 底层的 `AssistantMessageEvent`（供精细处理）
+
+agent-loop 中的桥接代码非常直接：
+
+<SourceReader
+  client:visible
+  code={`for await (const event of response) {
+  switch (event.type) {
+    case "start":
+      partialMessage = event.partial;
+      context.messages.push(partialMessage);
+      addedPartial = true;
+      await emit({ type: "message_start", message: { ...partialMessage } });
+      break;
+
+    case "text_start":
+    case "text_delta":
+    case "text_end":
+    case "thinking_start":
+    case "thinking_delta":
+    case "thinking_end":
+    case "toolcall_start":
+    case "toolcall_delta":
+    case "toolcall_end":
+      if (partialMessage) {
+        partialMessage = event.partial;
+        context.messages[context.messages.length - 1] = partialMessage;
+        await emit({
+          type: "message_update",
+          assistantMessageEvent: event,
+          message: { ...partialMessage },
+        });
+      }
+      break;
+
+    case "done":
+    case "error": {
+      const finalMessage = await response.result();
+      // ... update context and emit message_end
+      await emit({ type: "message_end", message: finalMessage });
+      return finalMessage;
+    }
+  }
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={276}
+  highlights={[
+    { line: 278, note: "start 事件触发 message_start — Agent 层的消息开始" },
+    { line: 289, note: "9 种中间事件全部映射为 message_update — 统一桥接" },
+    { line: 292, note: "{ ...partialMessage } 浅拷贝 — 防止后续 push 修改影响已发出的事件" },
+    { line: 301, note: "done/error 触发 message_end — Agent 层的消息结束" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/agent-loop.ts#L276"
+/>
+
+### ToolResult 同步 emit
+
+工具执行结果通过同步 emit 发出，**没有 update 事件**（工具的进度更新通过 `tool_execution_update` 独立报告）：
+
+```typescript
+// tool_execution_start: 工具开始执行
+await emit({ type: "tool_execution_start", toolCallId, toolName, args });
+
+// 工具执行中...（onUpdate 回调触发 tool_execution_update）
+
+// tool_execution_end: 工具执行完毕，结果立即可用
+await emit({ type: "tool_execution_end", toolCallId, toolName, result, isError });
+
+// 紧接着发出 ToolResultMessage
+await emit({ type: "message_start", message: toolResultMessage });
+await emit({ type: "message_end", message: toolResultMessage });
+```
+
+注意 `tool_execution_end` 和 `message_start/end` 是分开的 —— 前者是工具层面的事件，后者是消息层面的事件。这种分层让 UI 可以分别渲染工具执行状态和消息列表。
+
+### abort 后消息可继续使用
+
+`EventStream` 的一个重要设计是：即使 `error` 事件的 `reason` 为 `"aborted"`，返回的 `AssistantMessage` 仍然包含到中止点为止的所有内容：
+
+```typescript
+// error 事件中的 message 包含已收到的部分内容
+stream.push({
+  type: "error",
+  reason: "aborted",
+  error: partial,  // partial 包含中止前收到的所有 text/thinking/toolCall
+});
+```
+
+这意味着用户按下 Ctrl+C 后，UI 仍然可以展示已经接收到的回复内容，而不是一片空白。
+
+---
+
+## 4.4 流式 JSON 解析
+
+### 问题：工具调用参数是不完整的 JSON
+
+当 LLM 流式返回工具调用时，参数以 JSON 片段逐步到达：
+
+```
+toolcall_delta: '{"q'
+toolcall_delta: 'uer'
+toolcall_delta: 'y":'
+toolcall_delta: ' "weath'
+toolcall_delta: 'er in Tokyo"'
+toolcall_delta: ', "max_results": 5}'
+```
+
+累积起来是 `'{"query": "weather in Tokyo", "max_results": 5}'`，但在中间的任何时刻，累积的字符串都是 **不完整的 JSON**。UI 需要在参数构建过程中就展示正在输入的内容（"Searching for: weather in To..."），所以需要一个能处理不完整 JSON 的解析器。
+
+### parseStreamingJson 实现
+
+<SourceReader
+  client:visible
+  code={`import { parse as partialParse } from "partial-json";
+
+export function parseStreamingJson<T = any>(partialJson: string | undefined): T {
+  if (!partialJson || partialJson.trim() === "") {
+    return {} as T;
+  }
+
+  // Try standard parsing first (fastest for complete JSON)
+  try {
+    return JSON.parse(partialJson) as T;
+  } catch {
+    // Try partial-json for incomplete JSON
+    try {
+      const result = partialParse(partialJson);
+      return (result ?? {}) as T;
+    } catch {
+      // If all parsing fails, return empty object
+      return {} as T;
+    }
+  }
+}`}
+  filename="packages/ai/src/utils/json-parse.ts"
+  language="typescript"
+  startLine={1}
+  highlights={[
+    { line: 1, note: "partial-json 库：专门处理不完整 JSON 的解析器" },
+    { line: 4, note: "空输入快速返回空对象 — 避免不必要的解析开销" },
+    { line: 9, note: "先尝试标准 JSON.parse — 完整 JSON 时最快路径" },
+    { line: 13, note: "标准解析失败才 fallback 到 partial-json — 两层策略" },
+    { line: 17, note: "全部失败返回空对象 — 永远不抛异常" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/ai/src/utils/json-parse.ts#L1"
+/>
+
+### 设计决策：三层 fallback
+
+为什么不直接用 `partial-json`？因为 **大部分时候 JSON 最终会完整**（`toolcall_end` 时参数已完成），标准的 `JSON.parse` 比 `partial-json` 快得多。三层策略确保了：
+
+1. **完整 JSON** → `JSON.parse`（最快路径）
+2. **不完整但可恢复** → `partial-json`（如 `{"query": "wea` → `{"query": "wea"}`）
+3. **完全无法解析** → 返回 `{}`（安全降级，永不抛异常）
+
+### 每次 delta 全量重解析
+
+在 Proxy 的 `processProxyEvent` 中，可以看到 Pi 对工具调用 delta 的处理策略 —— **每次 delta 都对完整的累积字符串做全量重解析**：
+
+<SourceReader
+  client:visible
+  code={`case "toolcall_delta": {
+  const content = partial.content[proxyEvent.contentIndex];
+  if (content?.type === "toolCall") {
+    (content as any).partialJson += proxyEvent.delta;
+    content.arguments = parseStreamingJson(
+      (content as any).partialJson
+    ) || {};
+    partial.content[proxyEvent.contentIndex] = { ...content };
+    return {
+      type: "toolcall_delta",
+      contentIndex: proxyEvent.contentIndex,
+      delta: proxyEvent.delta,
+      partial,
+    };
+  }
+  throw new Error("Received toolcall_delta for non-toolCall content");
+}`}
+  filename="packages/agent/src/proxy.ts"
+  language="typescript"
+  startLine={293}
+  highlights={[
+    { line: 296, note: "partialJson 累积所有 delta — 维护完整的 JSON 字符串" },
+    { line: 297, note: "每次 delta 都全量重解析 — 简单但可靠" },
+    { line: 300, note: "{ ...content } 浅拷贝触发 UI 响应式更新" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/proxy.ts#L293"
+/>
+
+**为什么全量重解析而不是增量解析？** 因为 JSON 的语法特性使得增量解析极其复杂（需要维护状态机跟踪嵌套深度、字符串边界、转义字符等），而全量重解析简单且在实际场景中足够快 —— 工具调用参数通常只有几十到几百字节。
+
+---
+
+## 4.5 Proxy 传输层
+
+### 为什么需要 Proxy？
+
+直接从浏览器调用 LLM API 有两个根本问题：
+
+1. **安全性** —— API Key 必须暴露在客户端代码中
+2. **CORS** —— LLM API 通常不允许浏览器直接跨域请求
+
+Proxy 模式通过一个中间服务器解决这两个问题：
+
+```
+┌──────────┐   POST /api/stream   ┌──────────────┐   stream()   ┌───────────┐
+│  Browser  │ ─────────────────── │ Proxy Server │ ──────────── │  LLM API  │
+│ (Client)  │                     │  (Server)    │              │           │
+└──────────┘                     └──────────────┘              └───────────┘
+     ↑                                  │
+     │    NDJSON (精简事件)              │    SSE (完整事件)
+     │    无 partial 字段               │    含 partial 字段
+     └──────────────────────────────────┘
+```
+
+### ProxyAssistantMessageEvent：带宽优化
+
+Proxy 的核心优化是 **剥离 partial 字段**。原始 `AssistantMessageEvent` 的每个事件都携带完整的 `partial: AssistantMessage` 快照，在服务端到客户端的传输中，这是巨大的带宽浪费 —— 因为客户端可以自己用 delta 重建 partial。
+
+<SourceReader
+  client:visible
+  code={`export type ProxyAssistantMessageEvent =
+  | { type: "start" }
+  | { type: "text_start"; contentIndex: number }
+  | { type: "text_delta"; contentIndex: number; delta: string }
+  | { type: "text_end"; contentIndex: number; contentSignature?: string }
+  | { type: "thinking_start"; contentIndex: number }
+  | { type: "thinking_delta"; contentIndex: number; delta: string }
+  | { type: "thinking_end"; contentIndex: number; contentSignature?: string }
+  | { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
+  | { type: "toolcall_delta"; contentIndex: number; delta: string }
+  | { type: "toolcall_end"; contentIndex: number }
+  | {
+      type: "done";
+      reason: Extract<StopReason, "stop" | "length" | "toolUse">;
+      usage: AssistantMessage["usage"];
+    }
+  | {
+      type: "error";
+      reason: Extract<StopReason, "aborted" | "error">;
+      errorMessage?: string;
+      usage: AssistantMessage["usage"];
+    };`}
+  filename="packages/agent/src/proxy.ts"
+  language="typescript"
+  startLine={36}
+  highlights={[
+    { line: 37, note: "start: 没有 partial 字段 — 客户端自己初始化空消息" },
+    { line: 39, note: "text_delta: 只有 delta 和 contentIndex — 客户端累积文本" },
+    { line: 44, note: "toolcall_start: 额外携带 id 和 toolName — 客户端需要初始化 ToolCall" },
+    { line: 49, note: "done: 只有 reason 和 usage — 不包含完整 message" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/proxy.ts#L36"
+/>
+
+对比两种事件类型的一个 `text_delta` 事件大小：
+
+```
+AssistantMessageEvent (原始):
+{
+  "type": "text_delta",
+  "contentIndex": 0,
+  "delta": "H",
+  "partial": {
+    "role": "assistant",
+    "content": [{"type": "text", "text": "Hello worl"}],
+    "stopReason": "stop",
+    "api": "anthropic",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-5-20250514",
+    "usage": {...},
+    "timestamp": 1711234567890
+  }
+}
+// ~300 bytes per delta event
+
+ProxyAssistantMessageEvent (精简):
+{
+  "type": "text_delta",
+  "contentIndex": 0,
+  "delta": "H"
+}
+// ~50 bytes per delta event
+```
+
+一个典型的 500 token 响应可能产生 200+ 个 delta 事件，带宽节省约 **80%**。
+
+### 客户端重建 partial
+
+`streamProxy` 函数在客户端重建完整的 `AssistantMessageEvent`。核心是 `processProxyEvent` 函数 —— 它维护一个本地 `partial` 对象，每次收到 proxy 事件时更新这个对象并补上 `partial` 字段：
+
+<SourceReader
+  client:visible
+  code={`function processProxyEvent(
+  proxyEvent: ProxyAssistantMessageEvent,
+  partial: AssistantMessage,
+): AssistantMessageEvent | undefined {
+  switch (proxyEvent.type) {
+    case "start":
+      return { type: "start", partial };
+
+    case "text_start":
+      partial.content[proxyEvent.contentIndex] = { type: "text", text: "" };
+      return { type: "text_start", contentIndex: proxyEvent.contentIndex, partial };
+
+    case "text_delta": {
+      const content = partial.content[proxyEvent.contentIndex];
+      if (content?.type === "text") {
+        content.text += proxyEvent.delta;
+        return {
+          type: "text_delta",
+          contentIndex: proxyEvent.contentIndex,
+          delta: proxyEvent.delta,
+          partial,
+        };
+      }
+      throw new Error("Received text_delta for non-text content");
+    }
+
+    case "text_end": {
+      const content = partial.content[proxyEvent.contentIndex];
+      if (content?.type === "text") {
+        content.textSignature = proxyEvent.contentSignature;
+        return {
+          type: "text_end",
+          contentIndex: proxyEvent.contentIndex,
+          content: content.text,
+          partial,
+        };
+      }
+      throw new Error("Received text_end for non-text content");
+    }
+    // ... thinking 和 toolcall 类似处理
+  }
+}`}
+  filename="packages/agent/src/proxy.ts"
+  language="typescript"
+  startLine={211}
+  highlights={[
+    { line: 213, note: "partial 是唯一可变状态 — 每次调用都原地修改" },
+    { line: 217, note: "start: partial 不需要修改，直接返回" },
+    { line: 220, note: "text_start: 在 content 数组中创建空的 text 块" },
+    { line: 224, note: "text_delta: 累积文本 — content.text += delta" },
+    { line: 237, note: "text_end: 附加 signature — 用于内容验证" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/proxy.ts#L211"
+/>
+
+**关键设计**：`processProxyEvent` 是一个纯状态转换函数 —— 输入是 proxy 事件和当前 partial，输出是完整的 `AssistantMessageEvent`。调用方（`streamProxy`）只需要逐事件调用并 push 到 `EventStream` 即可。
+
+### NDJSON 行协议
+
+Proxy 使用 **SSE (Server-Sent Events)** 格式传输数据，每行以 `data: ` 前缀开始：
+
+```
+data: {"type":"start"}
+data: {"type":"text_start","contentIndex":0}
+data: {"type":"text_delta","contentIndex":0,"delta":"Hello"}
+data: {"type":"text_delta","contentIndex":0,"delta":" world"}
+data: {"type":"text_end","contentIndex":0}
+data: {"type":"done","reason":"stop","usage":{"input":10,"output":5,...}}
+```
+
+客户端按行解析：
+
+<SourceReader
+  client:visible
+  code={`reader = response.body!.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() || "";
+
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const data = line.slice(6).trim();
+      if (data) {
+        const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
+        const event = processProxyEvent(proxyEvent, partial);
+        if (event) {
+          stream.push(event);
+        }
+      }
+    }
+  }
+}`}
+  filename="packages/agent/src/proxy.ts"
+  language="typescript"
+  startLine={152}
+  highlights={[
+    { line: 153, note: "TextDecoder { stream: true } — 处理 UTF-8 多字节字符在 chunk 边界被截断的情况" },
+    { line: 155, note: "buffer + split 模式：处理一个 chunk 包含多行或一行被截断到两个 chunk 的情况" },
+    { line: 156, note: "pop() 保留最后一个不完整行 — 等下一个 chunk 补全" },
+    { line: 159, note: "line.startsWith('data: ') — SSE 协议前缀匹配" },
+    { line: 163, note: "processProxyEvent 转换并 push 到 EventStream — 完成从 proxy 到标准事件的桥接" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/proxy.ts#L152"
+/>
+
+### EOF 边界处理
+
+`buffer.split("\n")` + `lines.pop()` 是一个经典的行协议解析模式。注意以下边界情况：
+
+```
+Chunk 1: '{"type":"text_delta","delta":"he'  ← 一行被截断
+Chunk 2: 'llo"}\n{"type":"done",...}\n'      ← 跨越两行
+
+处理过程:
+  Chunk 1: buffer = '{"type":"text_delta","delta":"he'
+           lines = [], buffer = 原值 (无 \n)
+  Chunk 2: buffer = '{"type":"text_delta","delta":"hello"}\n{"type":"done",...}\n'
+           lines = ['{"type":"text_delta","delta":"hello"}', '{"type":"done",...}']
+           buffer = '' (最后 pop 出空字符串)
+```
+
+### streamProxy 使用方式
+
+对于应用开发者，使用 Proxy 非常简单 —— 只需替换 Agent 的 `streamFn`：
+
+```typescript
+import { Agent } from "@anthropic/pi-agent-core";
+import { streamProxy } from "@anthropic/pi-agent-core/proxy";
+
+const agent = new Agent({
+  streamFn: (model, context, options) =>
+    streamProxy(model, context, {
+      ...options,
+      authToken: await getAuthToken(),
+      proxyUrl: "https://your-proxy.example.com",
+    }),
+  // ... 其他配置
+});
+```
+
+---
+
+## 4.6 动手：实现流式处理
+
+本节的 5 个 demo 从零构建流式处理的理解：
+
+### Demo 04-01：EventStream from Scratch
+
+手工实现一个简化版 EventStream，理解 queue + waiter 推拉机制：
+
+<CodeComparison
+  client:visible
+  title="EventStream：Pi 实现 vs Demo 简化版"
+  left={{
+    title: "Pi 源码",
+    code: `class EventStream<T, R = T> implements AsyncIterable<T> {
+  private queue: T[] = [];
+  private waiting: ((value: IteratorResult<T>) => void)[] = [];
+  private done = false;
+  private finalResultPromise: Promise<R>;
+  private resolveFinalResult!: (result: R) => void;
+
+  constructor(
+    private isComplete: (event: T) => boolean,
+    private extractResult: (event: T) => R,
+  ) {
+    this.finalResultPromise = new Promise((resolve) => {
+      this.resolveFinalResult = resolve;
+    });
+  }
+
+  push(event: T): void {
+    if (this.done) return;
+    if (this.isComplete(event)) {
+      this.done = true;
+      this.resolveFinalResult(this.extractResult(event));
+    }
+    const waiter = this.waiting.shift();
+    if (waiter) {
+      waiter({ value: event, done: false });
+    } else {
+      this.queue.push(event);
+    }
+  }
+}`,
+    language: "typescript",
+    filename: "packages/ai/src/utils/event-stream.ts"
+  }}
+  right={{
+    title: "Demo 简化版",
+    code: `class EventStream<T, R> implements AsyncIterable<T> {
+  private queue: T[] = [];
+  private waiter: ((value: IteratorResult<T>) => void) | null = null;
+  private done = false;
+  private resultPromise: Promise<R>;
+  private resolveResult!: (value: R) => void;
+  private isCompletePredicate: (event: T) => boolean;
+
+  constructor(isComplete: (event: T) => boolean) {
+    this.isCompletePredicate = isComplete;
+    this.resultPromise = new Promise<R>((resolve) => {
+      this.resolveResult = resolve;
+    });
+  }
+
+  push(event: T): void {
+    if (this.done) return;
+    if (this.isCompletePredicate(event)) {
+      this.done = true;
+      if (this.waiter) {
+        this.waiter({ value: undefined as any, done: true });
+        this.waiter = null;
+      }
+      return;
+    }
+    if (this.waiter) {
+      this.waiter({ value: event, done: false });
+      this.waiter = null;
+    } else {
+      this.queue.push(event);
+    }
+  }
+}`,
+    language: "typescript",
+    filename: "demos/04-streaming/src/01-event-stream.ts"
+  }}
+  notes={[
+    "Pi 版支持多个 waiter（waiting 数组），Demo 版只支持单 waiter",
+    "Pi 版的 isComplete + extractResult 分离：终止判断和结果提取解耦",
+    "Pi 版在 isComplete 事件仍然 push 到消费者（done 事件可被迭代到），Demo 版直接丢弃",
+    "Pi 版的 end() 方法支持外部强制结束流"
+  ]}
+/>
+
+运行：`npx tsx demos/04-streaming/src/01-event-stream.ts`
+
+### Demo 04-02：Stream Text
+
+使用 Anthropic SDK 的 `client.messages.stream()` 实现打字机效果，订阅 `text` 事件逐字输出到 stdout。核心指标：Time to First Token（首 token 延迟）。
+
+运行：`ANTHROPIC_API_KEY=... npx tsx demos/04-streaming/src/02-stream-text.ts`
+
+### Demo 04-03：Stream Tools
+
+观察工具调用参数如何逐步构建。实现手写的 `parsePartialJson`，对比 Pi 使用 `partial-json` 库的方案。关键事件：`inputJson` 提供累积的 JSON 字符串。
+
+运行：`MOCK_MODE=1 npx tsx demos/04-streaming/src/03-stream-tools.ts`
+
+### Demo 04-04：Stream Thinking
+
+流式展示 Claude 的 extended thinking 过程。思维内容用灰色文字显示，最终回复用绿色。观察事件序列：`thinking_start → thinking_delta(n) → thinking_end → text_start → text_delta(n) → done`。
+
+运行：`ANTHROPIC_API_KEY=... npx tsx demos/04-streaming/src/04-stream-thinking.ts`
+
+### Demo 04-05：Proxy Transport
+
+一个文件同时运行 Express 服务端和 fetch 客户端。服务端接收请求、调用 Anthropic、以 NDJSON 格式回传精简事件。客户端用 ReadableStream 逐行解析。包含带宽分析。
+
+运行：`MOCK_MODE=1 npx tsx demos/04-streaming/src/05-proxy-transport.ts`
+
+---
+
+## 4.7 本章小结
+
+### 核心要点
+
+1. **EventStream 是推拉对偶的异步队列** —— `queue` 和 `waiting` 永远互斥非空，实现了生产者和消费者的速率解耦。双消费模式（`for-await` + `result()`）满足了 UI 实时渲染和后台批量处理两种需求
+
+2. **13 种 AssistantMessageEvent 构成统一的事件协议** —— 所有 provider adapter 将原始 API 事件转换为这套协议，上层代码无需感知不同 LLM API 的差异。`contentIndex` + `partial` 让消费者无需维护状态机
+
+3. **12 种 AgentEvent 形成三层嵌套生命周期** —— Agent → Turn → Message/ToolExecution。`message_update` 是两层事件系统的桥接点，同时携带高层消息和底层事件
+
+4. **流式 JSON 解析采用三层 fallback** —— `JSON.parse` → `partial-json` → `{}`。每次 delta 全量重解析，简单可靠，对于工具参数的典型大小（几十到几百字节）性能足够
+
+5. **Proxy 传输层通过剥离 partial 实现 80% 的带宽节省** —— 客户端用 `processProxyEvent` 从 delta 重建 partial，SSE 行协议 + buffer/split 模式处理 chunk 边界
+
+### 架构关系图
+
+```
+LLM Provider
+  │ SSE/WebSocket
+  ▼
+Provider Adapter (anthropic.ts / openai-completions.ts)
+  │ AssistantMessageEvent (13 种, 含 partial)
+  ▼
+EventStream<AssistantMessageEvent, AssistantMessage>
+  │ for-await-of / result()
+  ├──────────────────────────────────────────┐
+  ▼                                          ▼
+Agent Loop (agent-loop.ts)            Proxy Server
+  │ AgentEvent (12 种)                  │ 剥离 partial
+  ▼                                     ▼
+UI / Application                   ProxyAssistantMessageEvent
+                                     │ SSE (NDJSON)
+                                     ▼
+                                   streamProxy (客户端)
+                                     │ processProxyEvent 重建 partial
+                                     ▼
+                                   EventStream → Agent Loop → UI
+```
+
+### 下一章预告
+
+下一章我们将探索 **多模型支持** —— Pi 如何通过统一的 `Model` 抽象和 provider adapter 支持 Anthropic、OpenAI、Mistral、Bedrock 等多个 LLM 提供商，以及 thinking level 在不同模型之间的归一化策略。
