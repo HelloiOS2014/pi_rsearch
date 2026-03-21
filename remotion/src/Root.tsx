@@ -7,6 +7,9 @@ import { WhatIsAgent } from "./sequences/01-panorama/WhatIsAgent";
 import { PiArchOverview } from "./sequences/01-panorama/PiArchOverview";
 import { LoopAnimation } from "./sequences/02-core-loop/LoopAnimation";
 import { ToolCallFlow } from "./sequences/03-tool-system/ToolCallFlow";
+import { EventTimeline } from "./sequences/04-streaming/EventTimeline";
+import { ProviderAbstract } from "./sequences/05-multi-model/ProviderAbstract";
+import { FullArchitecture } from "./sequences/06-build-agent/FullArchitecture";
 
 export const RemotionRoot: React.FC = () => {
   return (
@@ -88,6 +91,36 @@ export const RemotionRoot: React.FC = () => {
         id="ToolCallFlow"
         component={ToolCallFlow}
         durationInFrames={450}
+        fps={30}
+        width={1920}
+        height={1080}
+      />
+
+      {/* V12: Event Timeline */}
+      <Composition
+        id="EventTimeline"
+        component={EventTimeline}
+        durationInFrames={450}
+        fps={30}
+        width={1920}
+        height={1080}
+      />
+
+      {/* V15: Provider Abstraction */}
+      <Composition
+        id="ProviderAbstract"
+        component={ProviderAbstract}
+        durationInFrames={360}
+        fps={30}
+        width={1920}
+        height={1080}
+      />
+
+      {/* V19: Full Architecture */}
+      <Composition
+        id="FullArchitecture"
+        component={FullArchitecture}
+        durationInFrames={600}
         fps={30}
         width={1920}
         height={1080}
