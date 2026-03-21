@@ -20,6 +20,7 @@ interface Props {
 }
 
 const { title, description, chapter, currentSlug, headings } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 
 // Get sorted chapters for prev/next navigation
 const allChapters = await getCollection('chapters');
@@ -57,7 +58,7 @@ const nextChapter = currentIndex < chapters.length - 1 ? chapters[currentIndex +
       <!-- Prev/Next navigation -->
       <nav class="chapter-pager" aria-label="章节翻页">
         {prevChapter ? (
-          <a href={`/${prevChapter.id}`} class="pager-link pager-prev">
+          <a href={`${base}/${prevChapter.id}`} class="pager-link pager-prev">
             <span class="pager-direction">{prevChapter.data.chapter >= 90 ? '上一篇' : '上一章'}</span>
             <span class="pager-title">
               <span class="pager-num">
@@ -72,7 +73,7 @@ const nextChapter = currentIndex < chapters.length - 1 ? chapters[currentIndex +
           <div />
         )}
         {nextChapter ? (
-          <a href={`/${nextChapter.id}`} class="pager-link pager-next">
+          <a href={`${base}/${nextChapter.id}`} class="pager-link pager-next">
             <span class="pager-direction">{nextChapter.data.chapter >= 90 ? '下一篇' : '下一章'}</span>
             <span class="pager-title">
               <span class="pager-num">

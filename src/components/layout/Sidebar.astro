@@ -6,6 +6,7 @@ interface Props {
 }
 
 const { currentSlug } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 
 const allChapters = await getCollection('chapters');
 const chapters = allChapters
@@ -46,7 +47,7 @@ const chapters = allChapters
             )}
             <li>
               <a
-                href={`/${chapter.id}`}
+                href={`${base}/${chapter.id}`}
                 class:list={['chapter-link', { active: isActive }]}
                 aria-current={isActive ? 'page' : undefined}
               >
