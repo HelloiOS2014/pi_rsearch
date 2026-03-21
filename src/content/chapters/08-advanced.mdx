@@ -1,0 +1,1295 @@
+---
+title: "进阶扩展"
+chapter: 8
+description: "扩展系统、TUI/Web UI 架构、Skills、产品化考量"
+---
+import SourceReader from '../../components/tutorial/SourceReader';
+import VideoEmbed from '../../components/tutorial/VideoEmbed';
+
+# 进阶扩展
+
+本章目标：探索 Pi 的扩展系统、TUI 架构、Skills、Web UI、以及产品化考量 —— 这些是将一个 Agent 从"能用"推向"好用"再到"可部署"的关键能力。
+
+前 7 章我们已经深入理解了 Agent 的核心循环、工具系统、流式处理、多模型支持，并构建了一个完整的 coding agent，还与其他框架做了对比。但一个生产级 Agent 产品还需要大量"外围"工程：扩展系统让社区能贡献功能，TUI 让终端体验媲美 IDE，Web UI 让浏览器用户也能使用，Skills 让 Agent 具备领域知识，安全和可靠性让它能真正上线。
+
+Pi 在这些方面的设计极其精细。本章将逐一剖析。
+
+---
+
+## 8.1 扩展系统
+
+### 设计哲学
+
+Pi 的扩展系统遵循一个核心原则：**核心不可改、行为可注入**。核心循环（Chapter 2 的 `while` 循环）永远不变，但扩展可以在循环的每个关键节点注入行为 —— 拦截、修改、增强。
+
+这不是传统的"插件 API"。Pi 的扩展不是被动地提供钩子函数，而是主动地参与 Agent 的生命周期。一个扩展可以：
+
+- 监听 15+ 种事件（session、tool、model、input 等）
+- 注册 LLM 可调用的自定义工具
+- 注册命令、键盘快捷键、CLI flag
+- 通过 UI primitives 与用户交互
+- 注入 Skills、Prompts、Themes 资源
+
+### 加载机制
+
+Pi 使用 [jiti](https://github.com/unjs/jiti) 实现运行时 TypeScript 编译。这意味着扩展可以直接用 `.ts` 编写，无需预编译步骤：
+
+```typescript
+// .pi/extensions/my-extension.ts  <-- 直接写 TypeScript
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.on("tool_call", (event, ctx) => {
+    console.log(`Tool called: ${event.toolName}`);
+  });
+}
+```
+
+扩展从两个位置加载，优先级从高到低：
+
+```
+.pi/extensions/           ← 项目级扩展（跟随项目仓库）
+~/.pi/agent/extensions/   ← 全局扩展（跨项目生效）
+```
+
+加载过程的关键设计：
+
+1. **jiti 编译**：运行时将 `.ts` 编译为可执行代码，支持 ESM import
+2. **工厂模式**：每个扩展导出一个函数 `(pi: ExtensionAPI) => void`，接收 API 对象
+3. **注册阶段**：扩展在工厂函数中调用 `pi.on()`、`pi.registerTool()` 等方法注册能力
+4. **延迟绑定**：Provider 注册在加载阶段排队，runner 初始化后才生效
+
+### 15+ 事件类型
+
+Pi 的扩展系统提供了覆盖 Agent 完整生命周期的事件类型。我们按类别来看：
+
+<SourceReader
+  client:visible
+  code={`/** Union of all event types */
+export type ExtensionEvent =
+  | ResourcesDiscoverEvent      // 资源发现（skills/prompts/themes）
+  | SessionEvent                // 会话生命周期（11 个子事件）
+  | ContextEvent                // LLM 调用前，可修改 messages
+  | BeforeProviderRequestEvent  // Provider 请求前，可修改 payload
+  | BeforeAgentStartEvent       // 用户提交后、agent loop 前
+  | AgentStartEvent             // agent loop 开始
+  | AgentEndEvent               // agent loop 结束
+  | TurnStartEvent              // 每个 turn 开始
+  | TurnEndEvent                // 每个 turn 结束
+  | MessageStartEvent           // 消息开始（user/assistant/toolResult）
+  | MessageUpdateEvent          // 流式 token 更新
+  | MessageEndEvent             // 消息结束
+  | ToolExecutionStartEvent     // 工具开始执行
+  | ToolExecutionUpdateEvent    // 工具执行中（streaming）
+  | ToolExecutionEndEvent       // 工具执行完成
+  | ModelSelectEvent            // 模型切换
+  | UserBashEvent               // 用户执行 ! / !! bash 命令
+  | InputEvent                  // 用户输入（可拦截/转换）
+  | ToolCallEvent               // 工具调用前（可阻止）
+  | ToolResultEvent;            // 工具结果后（可修改）`}
+  filename="packages/coding-agent/src/core/extensions/types.ts"
+  language="typescript"
+  startLine={818}
+  highlights={[
+    { line: 822, note: "SessionEvent 包含 11 个子事件：session_start/shutdown、before_switch/switch、before_fork/fork、before_compact/compact、before_tree/tree、session_directory" },
+    { line: 823, note: "context 事件在每次 LLM 调用前触发，扩展可以修改 messages 数组 — 注入上下文、过滤信息" },
+    { line: 836, note: "input 事件是输入链处理的入口：可以返回 handled（短路）、transform（变换）、continue（透传）" },
+    { line: 837, note: "tool_call 事件可以返回 { block: true, reason: '...' } 来阻止工具执行 — 这是权限控制的基础" },
+    { line: 838, note: "tool_result 事件可以修改工具返回的 content、details、isError — 后处理能力" }
+  ]}
+/>
+
+**Session 事件家族**（11 个事件）是最丰富的一组，覆盖了会话的完整生命周期：
+
+```
+session_directory → session_start → session_before_switch/switch
+                                  → session_before_fork/fork
+                                  → session_before_compact/compact
+                                  → session_before_tree/tree
+                                  → session_shutdown
+```
+
+`before_*` 系列事件的关键特性是**可取消** —— 返回 `{ cancel: true }` 即可阻止操作：
+
+```typescript
+pi.on("session_before_compact", async (event, ctx) => {
+  // 自定义压缩：用自己的 LLM 调用替代默认压缩
+  const customSummary = await myCompactionLogic(event.branchEntries);
+  return {
+    cancel: true,  // 阻止默认压缩
+    compaction: customSummary,  // 提供替代结果
+  };
+});
+```
+
+### ExtensionAPI：注册能力
+
+`ExtensionAPI` 是扩展的核心接口 —— 扩展工厂函数接收的 `pi` 参数。它提供了四大类注册能力：
+
+<SourceReader
+  client:visible
+  code={`export interface ExtensionAPI {
+  // 事件订阅 — 监听 15+ 种事件
+  on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
+  on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
+  on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
+  // ... 20+ 重载
+
+  // 工具注册 — 让 LLM 可以调用扩展提供的工具
+  registerTool<TParams extends TSchema>(tool: ToolDefinition<TParams>): void;
+
+  // 命令注册 — 添加 /command 斜杠命令
+  registerCommand(name: string, options: Omit<RegisteredCommand, "name">): void;
+
+  // 快捷键注册
+  registerShortcut(shortcut: KeyId, options: {
+    description?: string;
+    handler: (ctx: ExtensionContext) => Promise<void> | void;
+  }): void;
+
+  // CLI flag 注册
+  registerFlag(name: string, options: {
+    description?: string;
+    type: "boolean" | "string";
+    default?: boolean | string;
+  }): void;
+
+  // Provider 注册 — 添加或覆盖模型供应商
+  registerProvider(name: string, config: ProviderConfig): void;
+
+  // 消息渲染器 — 自定义消息类型的显示
+  registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void;
+
+  // 动作 — 主动与 Agent 交互
+  sendMessage(message: CustomMessage, options?: { triggerTurn?: boolean }): void;
+  sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
+
+  // 共享事件总线 — 扩展间通信
+  events: EventBus;
+}`}
+  filename="packages/coding-agent/src/core/extensions/types.ts"
+  language="typescript"
+  startLine={950}
+  highlights={[
+    { line: 955, note: "ToolCallEvent 提供类型安全的工具名窄化 — bash/read/edit/write/grep/find/ls 各有专用类型" },
+    { line: 960, note: "registerTool 接受 TypeBox schema 定义参数，Pi 自动将 schema 发送给 LLM 并验证输入" },
+    { line: 978, note: "registerProvider 可以在初始化阶段排队、运行时立即生效 — 支持热加载" },
+    { line: 987, note: "EventBus 是扩展间通信的唯一推荐方式 — 松耦合、类型安全" }
+  ]}
+/>
+
+### Input 链处理
+
+`input` 事件是扩展系统中最有趣的设计之一。当用户输入文本时，所有注册了 `input` 事件的扩展会按顺序处理，形成一个**处理链**：
+
+```typescript
+/** 输入事件的三种处理结果 */
+export type InputEventResult =
+  | { action: "continue" }                              // 透传 — 继续传给下一个扩展
+  | { action: "transform"; text: string; images?: ... } // 变换 — 修改内容后继续
+  | { action: "handled" };                               // 短路 — 完全由扩展处理，不发给 LLM
+```
+
+链处理的关键规则：
+
+1. **`handled` 短路**：返回 `{ action: "handled" }` 立即停止链，后续扩展不会收到事件
+2. **`transform` 传递**：修改后的内容传给下一个扩展
+3. **错误不断链**：单个扩展抛异常不会阻止其他扩展执行（静默记录错误）
+
+```typescript
+// 示例：检测中文输入并自动翻译
+pi.on("input", async (event, ctx) => {
+  if (/[\u4e00-\u9fa5]/.test(event.text)) {
+    const translated = await translate(event.text, "zh", "en");
+    return { action: "transform", text: translated };
+  }
+  return { action: "continue" };
+});
+```
+
+### resources_discover：动态资源注入
+
+`resources_discover` 事件在 `session_start` 之后触发，允许扩展动态提供 Skills、Prompts、Themes 的路径：
+
+```typescript
+pi.on("resources_discover", (event, ctx) => {
+  return {
+    skillPaths: ["/path/to/my/skills"],     // 注入自定义 skill 目录
+    promptPaths: ["/path/to/my/prompts"],   // 注入 prompt 模板目录
+    themePaths: ["/path/to/my/themes"],     // 注入主题目录
+  };
+});
+```
+
+这意味着扩展不仅可以注入代码行为，还可以注入**内容** —— Skills（领域知识）、Prompts（交互模板）、Themes（视觉风格）。
+
+### CLI Flag 注册
+
+扩展可以注册自定义 CLI flag，在启动时通过命令行传递配置：
+
+```typescript
+// 注册 flag
+pi.registerFlag("audit-mode", {
+  description: "Enable audit logging for all tool calls",
+  type: "boolean",
+  default: false,
+});
+
+pi.registerFlag("audit-output", {
+  description: "Path to audit log file",
+  type: "string",
+  default: "./audit.log",
+});
+
+// 在事件处理中读取
+pi.on("tool_call", (event, ctx) => {
+  if (pi.getFlag("audit-mode")) {
+    const output = pi.getFlag("audit-output") as string;
+    appendFileSync(output, JSON.stringify(event) + "\n");
+  }
+});
+```
+
+用户使用：`pi --audit-mode --audit-output=/tmp/audit.log`
+
+<VideoEmbed
+  title="V26: 扩展系统全景"
+  description="扩展加载、事件处理、工具注册、资源注入的完整流程动画"
+  duration="45s"
+  compositionId="V26-extensions"
+/>
+
+---
+
+## 8.2 TUI 架构
+
+Pi 的 TUI（Terminal User Interface）不是简单地用 `console.log` 打印文本 —— 它是一个完整的**差分渲染终端 UI 框架**，设计精度堪比浏览器渲染引擎。
+
+### 差分渲染：三种策略
+
+TUI 维护一个屏幕缓冲区（`previousLines: string[]`），每次渲染时将新内容与缓冲区对比，只更新变化的部分。Pi 使用三种渲染策略：
+
+```
+┌───────────────────────────────────────────────────────┐
+│  策略 1: Full Redraw — 窗口 resize 时                   │
+│  ─────────────────────────────────────────────────── │
+│  清空整个屏幕，从头重绘所有行                             │
+│  触发条件：terminal width/height 变化                    │
+│                                                       │
+│  策略 2: Diff Update — 常规内容更新                       │
+│  ─────────────────────────────────────────────────── │
+│  找到 firstChanged 和 lastChanged 行                    │
+│  只重绘 [firstChanged, lastChanged] 范围               │
+│  大部分帧只需要更新 1-3 行                               │
+│                                                       │
+│  策略 3: Delete Only — 内容缩短时                        │
+│  ─────────────────────────────────────────────────── │
+│  当新内容行数 < 旧内容行数                                │
+│  删除多余的行（从底部向上擦除）                            │
+│  然后 diff update 剩余部分                               │
+└───────────────────────────────────────────────────────┘
+```
+
+Diff Update 的核心算法非常简洁：
+
+```typescript
+// 找到变化范围
+let firstChanged = -1;
+let lastChanged = -1;
+
+for (let i = 0; i < newLines.length; i++) {
+  if (newLines[i] !== previousLines[i]) {
+    if (firstChanged === -1) firstChanged = i;
+    lastChanged = i;
+  }
+}
+
+// 只重绘变化的行
+if (firstChanged !== -1) {
+  moveCursorTo(firstChanged);
+  for (let i = firstChanged; i <= lastChanged; i++) {
+    clearLine();
+    write(newLines[i]);
+  }
+}
+```
+
+### 同步输出
+
+终端渲染有一个经典问题：当大量内容快速写入时，终端模拟器可能在写入过程中刷新屏幕，导致**闪烁**（tearing）。Pi 使用 **Synchronized Output** 协议解决这个问题：
+
+```typescript
+// 开始同步区域 — 终端暂停渲染
+write("\x1b[?2026h");
+
+// 执行所有写入操作（移动光标、清行、写内容）
+for (const line of changedLines) {
+  write(line);
+}
+
+// 结束同步区域 — 终端一次性刷新
+write("\x1b[?2026l");
+```
+
+`\x1b[?2026h` 和 `\x1b[?2026l` 是 DEC Private Mode 2026（由 [contour terminal](https://contour-terminal.org) 提出），被 iTerm2、Kitty、WezTerm 等现代终端广泛支持。
+
+### 组件系统
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Component interface - all components must implement this
+ */
+export interface Component {
+  /**
+   * Render the component to lines for the given viewport width
+   * @param width - Current viewport width
+   * @returns Array of strings, each representing a line
+   */
+  render(width: number): string[];
+
+  /**
+   * Optional handler for keyboard input when component has focus
+   */
+  handleInput?(data: string): void;
+
+  /**
+   * If true, component receives key release events (Kitty protocol).
+   * Default is false - release events are filtered out.
+   */
+  wantsKeyRelease?: boolean;
+
+  /**
+   * Invalidate any cached rendering state.
+   * Called when theme changes or when component needs to re-render from scratch.
+   */
+  invalidate(): void;
+}`}
+  filename="packages/tui/src/tui.ts"
+  language="typescript"
+  startLine={16}
+  highlights={[
+    { line: 22, note: "render() 返回 string[] — 每个字符串是终端中的一行。TUI 用差分算法比对前后 render 结果" },
+    { line: 27, note: "handleInput 接收原始终端输入（包括 ANSI 转义序列），组件自行解析键盘事件" },
+    { line: 32, note: "Kitty keyboard protocol 的 key release 事件默认被过滤 — 除非组件明确需要" },
+    { line: 38, note: "invalidate() 用于主题切换时清空渲染缓存 — 强制下一帧完整重绘" }
+  ]}
+/>
+
+Pi 的组件体系包含以下核心组件：
+
+**Text 组件**：基础文本渲染，支持 ANSI 颜色和样式。
+
+**Input 组件**：带有 **Emacs Kill-Ring** 支持的输入框：
+- `Ctrl+K` — 从光标位置剪切到行尾（kill）
+- `Ctrl+Y` — 粘贴最近一次 kill 的内容（yank）
+- `Alt+Y` — 在 kill ring 中循环选择之前的 kill 内容
+
+**Editor 组件**：多行编辑器，具备粘贴检测功能：
+- 当检测到大块粘贴内容时，自动折叠并显示 `[paste #N +Nlines]` 标记
+- 避免大段粘贴文本淹没编辑器视口
+
+**Markdown 组件**：带有 **AnsiCodeTracker** 的 Markdown 渲染：
+- 跟踪跨行 ANSI 样式状态（如一个粗体区间跨越多行）
+- 在行边界自动关闭并重新打开样式代码
+- 确保差分渲染时每行都是自包含的（不依赖前一行的样式状态）
+
+**Image 组件**：三种协议的自适应图片渲染：
+
+```
+优先级 1: Kitty Graphics Protocol
+  ─ 4096 字节分块传输（chunking）
+  ─ 支持 PNG/JPEG 直接传输
+  ─ 最高质量
+
+优先级 2: iTerm2 Inline Images
+  ─ Base64 编码内联
+  ─ 单块传输
+
+优先级 3: 文本降级
+  ─ ASCII art 或 [image: description]
+  ─ 适用于不支持图形协议的终端
+```
+
+Kitty 的 4096 字节分块是必要的，因为某些终端对单次写入的数据量有限制。Pi 将图片数据分成 4096 字节的块，每块用 Kitty APC 序列包装：
+
+```
+\x1b_Gf=100,s=<w>,v=<h>,m=1;<chunk1>\x1b\\    ← m=1 表示还有后续
+\x1b_Gm=1;<chunk2>\x1b\\
+\x1b_Gm=0;<chunkN>\x1b\\                       ← m=0 表示最后一块
+```
+
+### Overlay 系统
+
+Pi 的 TUI 支持叠加层（overlay），用于弹窗、选择器、设置面板等：
+
+```
+┌────────────────────────────────────────┐
+│  主内容 (z=0)                           │
+│  ┌──────────────────────────────┐      │
+│  │  搜索面板 (z=1)               │      │
+│  │  ┌────────────────────┐      │      │
+│  │  │  确认弹窗 (z=2)     │      │      │
+│  │  └────────────────────┘      │      │
+│  └──────────────────────────────┘      │
+└────────────────────────────────────────┘
+```
+
+Overlay 系统的关键设计：
+
+1. **Z-ordering**：每个 overlay 有层级，高层级覆盖低层级
+2. **Focus 管理**：只有最顶层的 overlay 接收键盘输入
+3. **compositeLineAt**：逐行合成 —— 对于每一行，从底层到顶层逐个 overlay 查询该行内容，最顶层的非空内容胜出
+
+### CURSOR_MARKER：IME 支持
+
+中文/日文/韩文输入法（IME）需要知道光标的精确位置来放置候选词窗口。Pi 使用一个零宽度的 APC（Application Program Command）序列作为光标标记：
+
+```typescript
+const CURSOR_MARKER = "\x1b_pi:c\x07"; // 零宽度，不影响显示
+```
+
+当组件需要硬件光标时，在 `render()` 输出中插入 `CURSOR_MARKER`。TUI 扫描渲染结果，找到标记位置，将终端硬件光标移动到该处。这样 IME 候选窗口就能准确定位。
+
+<SourceReader
+  client:visible
+  code={`/**
+ * Interface for components that can receive focus and display a hardware cursor.
+ * When focused, the component should emit CURSOR_MARKER at the cursor position
+ * in its render output. TUI will find this marker and position the hardware
+ * cursor there for proper IME candidate window positioning.
+ */
+export interface Focusable {
+  /** Set by TUI when focus changes. Component should emit CURSOR_MARKER when true. */
+  focused: boolean;
+}`}
+  filename="packages/tui/src/tui.ts"
+  language="typescript"
+  startLine={51}
+  highlights={[
+    { line: 55, note: "这解决了一个实际问题：中日韩用户在终端 Agent 中输入时，IME 候选词窗口会飘到错误位置" },
+    { line: 58, note: "focused 由 TUI 设置 — 组件只需要在 focused=true 时在 render 输出中放置 CURSOR_MARKER" }
+  ]}
+/>
+
+### Kitty 键盘协议
+
+传统终端键盘协议无法区分很多按键组合（如 `Ctrl+I` vs `Tab`，`Ctrl+M` vs `Enter`）。Pi 使用 **Kitty Keyboard Protocol** 获取精确的按键信息：
+
+```typescript
+// 启用 Kitty 键盘协议（Flag 1+2+4 = 7）
+write("\x1b[>7u");
+// Flag 1: 消歧义模式 — 区分 Ctrl+I 和 Tab
+// Flag 2: 报告事件类型 — 区分 press/repeat/release
+// Flag 4: 报告备用键 — 提供 Unicode code point
+
+// 退出时恢复
+write("\x1b[<u");
+```
+
+对于不支持 Kitty 协议的终端，Pi 有 150ms 超时的 **modifyOtherKeys** 降级策略：
+
+```
+检测流程:
+1. 发送 Kitty 协议启用序列
+2. 等待 150ms
+3. 如果收到 Kitty 格式的按键事件 → 使用 Kitty 协议
+4. 如果超时 → 退回传统协议 + modifyOtherKeys level 2
+```
+
+---
+
+## 8.3 Interactive Mode
+
+Pi 的交互模式是一个 **4,358 行的编排器（orchestrator）**，是整个项目中最大的单一文件。它协调 TUI、Agent Loop、Session Manager、Extension System 的交互。
+
+### 6 阶段启动
+
+```
+阶段 1: Terminal Setup
+  ├── 检测终端能力（颜色深度、图形协议、键盘协议）
+  ├── 初始化 TUI（设置 raw mode、alternate screen）
+  └── 加载主题
+
+阶段 2: Extension Loading
+  ├── 扫描 .pi/extensions/ 和 ~/.pi/agent/extensions/
+  ├── jiti 编译加载每个扩展
+  └── 收集注册的工具、命令、快捷键、flag
+
+阶段 3: Session Resolution
+  ├── 查找或创建 session 文件
+  ├── 恢复上次的会话状态
+  └── 触发 session_start 事件
+
+阶段 4: Resource Discovery
+  ├── 触发 resources_discover 事件
+  ├── 加载 Skills、Prompts、Themes
+  └── 构建 system prompt
+
+阶段 5: Model Selection
+  ├── 解析 CLI 指定的模型
+  ├── 检查 API key 可用性
+  └── 设置默认 thinking level
+
+阶段 6: Interactive Loop
+  ├── 显示欢迎信息和快捷键提示
+  ├── 进入 read-eval-print 循环
+  └── 等待用户输入或 Agent 事件
+```
+
+### 8 种消息组件类型
+
+交互模式中的每条消息都有对应的 UI 组件：
+
+| 类型 | 用途 | 关键特性 |
+|------|------|---------|
+| **UserMessage** | 用户输入 | 显示用户文本和附加图片 |
+| **AssistantMessage** | LLM 回复 | 流式 Markdown 渲染，支持思考过程展开/折叠 |
+| **BashExecution** | bash 工具执行 | 终端风格显示，命令 + 输出，可展开/折叠 |
+| **ToolExecution** | 其他工具执行 | 工具名 + 参数 + 结果，支持自定义渲染器 |
+| **CompactionSummary** | 上下文压缩 | 显示压缩前后的 token 数对比 |
+| **BranchSummary** | 分支导航 | 显示从一个分支切换到另一个分支的摘要 |
+| **CustomMessage** | 扩展自定义消息 | 通过 `registerMessageRenderer` 自定义渲染 |
+| **SkillInvocation** | Skill 调用 | 显示 skill 名称和注入的 prompt |
+
+### 20+ 键盘快捷键
+
+Pi 的交互模式注册了丰富的快捷键：
+
+```
+基础操作:
+  Escape           停止当前 streaming / 取消当前输入
+  Ctrl+D           退出 Pi
+  Ctrl+C           中断当前操作
+  Enter            提交输入
+  Alt+Enter        添加换行（多行输入）
+
+模型与思考:
+  Ctrl+P           循环切换模型
+  Ctrl+T           切换 thinking level
+
+会话管理:
+  Escape Escape    打开 Tree/Fork 选择器
+  Ctrl+R           打开 Session 选择器
+  Ctrl+N           新建 session
+
+显示控制:
+  Ctrl+E           展开/折叠工具输出
+  Ctrl+L           清屏
+  Ctrl+S           打开设置
+  Ctrl+/           显示快捷键帮助
+
+Follow-up:
+  Alt+Enter        在 agent 运行中发送 follow-up 消息
+  (当 agent idle)  提交多行输入
+```
+
+### TreeSelector：650+ 行
+
+TreeSelector 是 Pi 最复杂的 UI 组件之一 —— 一个可交互的 ASCII 树状图，展示会话的完整分支历史：
+
+```
+Session Tree (5 entries, 2 branches)
+
+  ● [main] 初始化项目结构                        ← 当前位置
+  ├── ○ 添加 README.md
+  │   ├── ○ 实现登录功能
+  │   └── ○ 修复 CSS bug
+  └── ★ [feature] 添加搜索功能                   ← 标记的分支
+
+  [f]ilter: all  [l]abel  [enter] navigate  [q]uit
+```
+
+TreeSelector 的 5 种过滤模式：
+
+1. **all** — 显示所有节点
+2. **labeled** — 只显示有标签的节点
+3. **user** — 只显示用户消息
+4. **assistant** — 只显示助手回复
+5. **branching** — 只显示有多个子节点的分叉点
+
+还支持：
+- **fold/unfold** — 折叠/展开子树
+- **label editing** — 给节点添加或修改标签
+- 键盘导航（j/k 上下、Enter 跳转、q 退出）
+
+### SessionSelector：1000+ 行
+
+SessionSelector 提供跨 session 的浏览和切换，支持两种视图：
+
+```
+Current Session View:
+  展示当前 session 的详细信息 — 入口数量、token 用量、最后活动时间
+
+All Sessions View:
+  ┌─────────────────────────────────────────────────┐
+  │  > [搜索...]                                     │
+  │                                                  │
+  │  今天                                            │
+  │    ● 调试登录模块    12:30  sonnet  1.2K tokens  │
+  │    ● 重构数据层      10:15  opus    3.5K tokens  │
+  │                                                  │
+  │  昨天                                            │
+  │    ○ 写测试用例      18:00  sonnet  800 tokens   │
+  └─────────────────────────────────────────────────┘
+```
+
+三种排序模式：**recent**（最近活动）、**threaded**（按父子关系分组）、**fuzzy**（模糊搜索匹配度）。
+
+### SettingsSelector
+
+15+ 可配置项，每项都有子菜单：
+
+```
+Settings:
+  Model              → [sonnet, opus, haiku, ...]
+  Thinking Level     → [off, low, medium, high]
+  Theme              → [dark, light, custom, ...]
+  Tools              → [bash, read, edit, write, ...]
+  Context Size       → [显示当前 token 用量]
+  Compact            → [触发上下文压缩]
+  ...
+```
+
+### 主题系统
+
+Pi 的主题系统支持 **50+ 颜色 token**，分为 7 个类别：
+
+```
+Category          Example Tokens
+─────────────     ──────────────────────────
+text              text.primary, text.secondary, text.muted, text.link
+background        bg.primary, bg.secondary, bg.input, bg.hover
+border            border.default, border.focused, border.subtle
+accent            accent.primary, accent.secondary, accent.error, accent.warning
+syntax            syntax.keyword, syntax.string, syntax.comment, syntax.function
+tool              tool.bash.bg, tool.edit.border, tool.read.accent
+ui                ui.cursor, ui.selection, ui.scrollbar
+```
+
+关键设计：
+
+- **vars 引用**：token 可以引用其他 token（`accent.primary` 引用 `text.link`）
+- **truecolor/256-color 自动检测**：根据终端能力选择颜色模式
+- **dark/light 内置**：两套预设主题
+- **自定义 JSON**：用户可以在 `~/.pi/agent/themes/my-theme.json` 放置自定义主题
+
+---
+
+## 8.4 Web UI 架构
+
+Pi 不仅是终端工具 —— 它还有一个基于 **mini-lit** Web Components 的浏览器 UI。
+
+### 组件架构
+
+Web UI 采用 Web Components 构建，避免了 React/Vue 等框架依赖：
+
+```
+ChatPanel (顶层容器)
+├── AgentInterface (对话区域)
+│   ├── StreamingMessageContainer (消息流)
+│   │   ├── UserMessage
+│   │   ├── AssistantMessage (流式渲染)
+│   │   └── ToolExecution
+│   └── InputArea
+└── ArtifactsPanel (预览面板)
+    ├── HTMLArtifact
+    ├── SVGArtifact
+    ├── PDFArtifact
+    └── ...
+```
+
+### StreamingMessageContainer：RAF 批量更新
+
+流式渲染在 Web 中面临一个挑战：token 到达频率可能极高（每秒几十次），但浏览器只需要每帧（~16.7ms）更新一次 DOM。Pi 使用 **requestAnimationFrame (RAF) 批量更新**：
+
+```typescript
+class StreamingMessageContainer {
+  private pendingUpdate = false;
+  private messages: Message[] = [];
+
+  onTokenReceived(token: Token) {
+    // 累积 token 到内部状态
+    this.messages = updateMessages(this.messages, token);
+
+    // 如果还没有排队渲染，排一个
+    if (!this.pendingUpdate) {
+      this.pendingUpdate = true;
+      requestAnimationFrame(() => {
+        this.render();
+        this.pendingUpdate = false;
+      });
+    }
+  }
+}
+```
+
+一个关键细节是**深拷贝检测嵌套变异**：
+
+```typescript
+// 为什么需要 JSON.parse(JSON.stringify(...)) ？
+// Web Components 的响应式系统只检测引用变化
+// 当内部属性变化时（如 message.content += token），引用不变，不触发更新
+// 深拷贝创建新引用，强制触发更新
+this.messages = JSON.parse(JSON.stringify(this.messages));
+```
+
+这看起来"暴力"，但因为有 RAF 批处理，每帧最多执行一次，性能完全可控。
+
+### Artifact 沙箱
+
+Artifacts 是 Web UI 的核心功能 —— 让 LLM 生成的 HTML/SVG/代码可以实时预览。沙箱设计需要平衡安全性与功能性：
+
+```
+两种沙箱模式:
+
+模式 1: srcdoc (默认)
+  ─ 使用 iframe srcdoc 属性
+  ─ 严格沙箱：sandbox="allow-scripts"
+  ─ 无法访问父页面 DOM
+  ─ 适用于 Web 应用
+
+模式 2: sandboxUrl (浏览器扩展)
+  ─ 使用独立 URL 加载 sandbox 页面
+  ─ 需要配置允许的域名
+  ─ 浏览器扩展的 CSP 限制要求这种方式
+```
+
+**RuntimeProvider 注入**：sandbox 可以注入运行时环境（如 React、D3.js），让 LLM 生成的代码能使用这些库而无需自行引入。
+
+**window.complete() 回调**：Artifact 执行完毕后调用 `window.complete()` 通知父页面，Pi 据此更新状态（从"运行中"切换到"完成"）。
+
+### 8 种 Artifact 类型
+
+| 类型 | 渲染方式 | 特性 |
+|------|---------|------|
+| **HTML** | iframe sandbox | 支持 JS 执行，RuntimeProvider 注入 |
+| **SVG** | inline SVG 或 iframe | 支持动画和交互 |
+| **PDF** | iframe 或下载链接 | 生成 PDF 文档预览 |
+| **DOCX** | 下载链接 | Word 文档生成 |
+| **XLSX** | 下载链接 | Excel 表格生成 |
+| **Markdown** | HTML 渲染 | 实时 Markdown 预览 |
+| **Text** | pre 元素 | 纯文本内容 |
+| **Image** | img 元素 | 生成的图片 |
+
+### Message Renderer Registry
+
+Web UI 的消息渲染是可扩展的 —— 每种角色（user/assistant/tool）有默认渲染器，但可以通过 Registry 注册自定义渲染器：
+
+```typescript
+// 注册自定义消息渲染器
+rendererRegistry.register("custom_chart", (message, container) => {
+  const chart = document.createElement("canvas");
+  drawChart(chart, message.details.data);
+  container.appendChild(chart);
+});
+```
+
+这与 TUI 中的 `registerMessageRenderer` 对应 —— 同一个扩展的消息在终端和浏览器中都能正确渲染。
+
+### IndexedDB 存储
+
+Web UI 使用 IndexedDB 持久化数据，分为三个 Store：
+
+```
+SettingsStore     — 用户设置（主题、模型偏好、显示选项）
+SessionsStore     — 会话历史（消息、分支、元数据）
+ProviderKeysStore — API 密钥（加密存储）
+```
+
+### CORS Proxy
+
+浏览器的同源策略阻止直接调用 LLM API。Pi 的 Web UI 内置 CORS Proxy，有 provider 特定的规则：
+
+```
+Provider-specific CORS rules:
+
+z.ai          → 始终走 proxy（不支持 CORS）
+Anthropic     → 根据 OAuth 状态决定
+                  有 OAuth token → 直接调用（Anthropic API 支持 CORS）
+                  API key 模式 → 走 proxy（避免 key 泄露到浏览器）
+OpenAI        → 始终走 proxy
+Google        → 始终走 proxy
+```
+
+---
+
+## 8.5 Skills & Prompt Templates
+
+### Skills：给 Agent 领域知识
+
+Skills 是 Pi 的"知识注入"机制 —— 让 Agent 在特定场景下获得专业能力，而不需要修改代码。
+
+**Skill 格式**：一个 Markdown 文件 + YAML frontmatter
+
+```markdown
+---
+name: "docker"
+description: "Docker 容器管理专家，擅长 Dockerfile 编写和 compose 配置"
+---
+
+# Docker Skills
+
+## Dockerfile 最佳实践
+- 使用多阶段构建减小镜像体积
+- 将不常变化的层放在前面利用缓存
+- 使用 .dockerignore 排除不必要的文件
+...
+
+## docker-compose 配置模式
+...
+```
+
+**Skill 发现**：从两个位置自动加载
+
+```
+.pi/skills/              ← 项目级 skill（随项目分发）
+~/.pi/agent/skills/      ← 全局 skill（个人积累）
++ resources_discover     ← 扩展动态注入的 skill 路径
+```
+
+**注入方式**：Skills 以 XML 格式注入到 system prompt 中：
+
+```xml
+<available_skills>
+  <skill name="docker" description="Docker 容器管理专家">
+    调用方式: /skill docker
+  </skill>
+  <skill name="testing" description="测试策略与框架选择">
+    调用方式: /skill testing
+  </skill>
+</available_skills>
+```
+
+当用户调用 `/skill docker` 时，该 skill 的完整内容被注入到当前对话的 system prompt 中。
+
+**disable-model-invocation flag**：某些 skill 只允许用户手动调用，不允许 LLM 自动触发。在 frontmatter 中设置：
+
+```yaml
+---
+name: "dangerous-ops"
+description: "数据库运维操作"
+disable-model-invocation: true
+---
+```
+
+### Prompt Templates：可复用的交互模式
+
+Prompt Templates 是预定义的交互模板，支持参数替换：
+
+```markdown
+---
+name: "review"
+description: "代码审查模板"
+---
+
+请审查以下代码变更：
+
+$1
+
+重点关注：
+- 逻辑正确性
+- 性能影响
+- 安全隐患
+```
+
+**参数替换语法**：
+
+| 语法 | 含义 |
+|------|------|
+| `$1` | 第一个参数 |
+| `$2` | 第二个参数 |
+| `$@` | 所有参数（空格连接） |
+| `${@:2:3}` | 从第 2 个参数开始取 3 个（bash 风格切片） |
+
+使用示例：
+
+```
+/prompt review "修改了登录逻辑，添加了 2FA 支持"
+                ↑
+                $1 替换为这段文本
+```
+
+---
+
+## 8.6 MOM & Pods
+
+Pi 不仅是一个 CLI 工具 —— 它的架构也支持部署为服务端应用。两个实际案例：MOM（Slack Bot）和 Pods（GPU 服务）。
+
+### MOM：Slack Bot 模式
+
+MOM 将 Pi 的 Agent 能力暴露为 Slack Bot，每个频道都有独立的 Agent 状态：
+
+```
+Slack Workspace
+├── #dev-general     → ChannelState { running: false, memory: MEMORY.md }
+├── #code-review     → ChannelState { running: true,  memory: MEMORY.md }
+└── #infra-alerts    → ChannelState { running: false, memory: MEMORY.md }
+```
+
+关键设计：
+
+**ChannelState**：每个频道维护独立状态
+
+```typescript
+interface ChannelState {
+  running: boolean;          // 是否正在处理消息
+  stopRequested: boolean;    // 是否收到停止指令
+  queue: ChannelQueue;       // 消息队列（串行化）
+  memory: string;            // MEMORY.md 路径（频道级持久记忆）
+}
+```
+
+**ChannelQueue 串行化**：Slack 消息可能并发到达，但 Agent 必须串行处理。ChannelQueue 确保每个频道同一时间只有一个消息在处理，其余排队等待。
+
+**硬编码模型**：MOM 固定使用 `claude-sonnet-4-5`，不允许用户切换。这是有意的产品决策 —— 避免 Slack 场景下的模型混乱。
+
+**截断策略**：
+
+```
+主频道消息: 35K token 截断
+线程消息:   20K token 截断
+```
+
+Slack 的消息上下文远比终端交互长（包含大量频道历史），需要激进的截断来控制成本和延迟。
+
+**MEMORY.md**：每个频道有一个持久记忆文件。Agent 可以在处理过程中更新这个文件，下次被 `@` 提及时会自动加载。
+
+### Pods：GPU 推理服务
+
+Pods 将本地模型（Qwen、GPT-OSS、GLM 等）部署到 GPU 服务器上，通过 SSH 管理生命周期：
+
+```
+本地 Pi                         GPU 服务器
+   │                               │
+   ├── SSH 连接 ──────────────────→│
+   ├── 启动 vLLM 服务 ────────────→│  port 8001
+   ├── 注册为 Provider ──────────→ │
+   ├── API 请求 ─────────────────→ │  OpenAI 兼容
+   │                               │
+   └── 关闭时清理 ────────────────→│  停止 vLLM
+```
+
+**端口管理**：从 8001 开始自动递增，避免端口冲突
+
+```
+Pod 1 → port 8001 (Qwen-72B)
+Pod 2 → port 8002 (GLM-130B)
+Pod 3 → port 8003 (GPT-OSS-7B)
+```
+
+**GPU 选择**：Round-robin 轮询可用 GPU
+
+```
+GPU 0: Qwen-72B     (占用)
+GPU 1: 空闲          ← 下一个 Pod 分配到这里
+GPU 2: GLM-130B     (占用)
+GPU 3: 空闲
+```
+
+**预定义模型配置**：Pi 内置了常用开源模型的 vLLM 配置，包括：
+
+| 模型 | 显存需求 | 上下文窗口 | 说明 |
+|------|---------|-----------|------|
+| Qwen2.5-72B | 4xA100 | 32K | 代码生成能力强 |
+| GPT-OSS-7B | 1xA100 | 8K | 轻量快速 |
+| GLM-4-9B | 1xA100 | 128K | 超长上下文 |
+
+---
+
+## 8.7 产品化考量
+
+将一个 Agent 从 Demo 推向产品，需要在多个维度做好工程。以下是 Pi 的产品化设计全景：
+
+### 认证与安全
+
+| 维度 | 设计 | 关键细节 |
+|------|------|---------|
+| **OAuth PKCE** | 安全的 OAuth 2.0 授权码流 | 无需 client secret，适合 CLI 和浏览器场景 |
+| **文件锁** | API key 文件使用文件锁 | 防止多实例同时读写导致损坏 |
+| **多实例刷新** | Token 刷新使用锁协调 | 避免多个 Pi 实例同时刷新 token 导致旧 token 失效 |
+| **beforeToolCall 权限** | 工具执行前权限检查 | 扩展可以通过 `tool_call` 事件返回 `{ block: true }` 阻止危险操作 |
+| **Sandbox** | bash 工具沙箱执行 | 可配置的沙箱策略（Docker、macOS sandbox-exec） |
+| **敏感过滤** | 工具结果中过滤敏感信息 | 自动检测并屏蔽 API key、密码等模式 |
+
+### 可靠性
+
+| 维度 | 设计 | 关键细节 |
+|------|------|---------|
+| **指数退避** | API 调用失败后的重试策略 | 基础延迟 1s，最大延迟 60s，jitter 防止雷群效应 |
+| **溢出恢复** | 上下文窗口满时自动压缩 | 检测到 400 错误（context too long）时自动触发 compaction |
+| **Abort 传播** | AbortSignal 贯穿整个调用链 | 从用户 Escape 到 LLM API 到工具执行，abort 信号层层传递 |
+| **扩展错误隔离** | 扩展错误不影响核心 | 单个扩展抛异常时静默记录，继续执行其他扩展和核心逻辑 |
+| **优雅关闭** | shutdown 事件有序清理 | session_shutdown 事件让扩展保存状态；未完成的工具执行等待完成 |
+
+### 可观测性
+
+| 维度 | 设计 | 关键细节 |
+|------|------|---------|
+| **事件驱动** | 所有关键操作都发射事件 | 扩展可以将事件转发到日志系统、监控平台 |
+| **Token 成本追踪** | 每次 LLM 调用记录 token 用量 | input/output/cache_read/cache_write 分别计数，乘以价格表 |
+| **工具计时** | 每次工具执行记录耗时 | tool_execution_start/end 事件携带时间戳 |
+| **Session 持久化** | 完整的交互历史 | 每条消息、工具调用、结果都持久化到 session 文件 |
+| **上下文用量** | 实时显示 context 使用百分比 | `getContextUsage()` 返回当前 token 数、窗口大小、百分比 |
+
+### 部署模式
+
+| 模式 | 技术栈 | 适用场景 |
+|------|--------|---------|
+| **CLI (npm)** | `npx pi` / `npm install -g` | 开发者本地使用 |
+| **CLI (Bun binary)** | 单文件二进制，无需 Node.js | 分发给非开发者 |
+| **Web CORS Proxy** | Express/Fastify proxy server | 浏览器 Web UI |
+| **SDK** | `createAgentSession()` | 嵌入到其他应用中 |
+| **RPC (JSONL)** | stdin/stdout JSONL 协议 | IDE 集成（VS Code 等） |
+
+**SDK 模式**的核心是 `createAgentSession()`：
+
+```typescript
+import { createAgentSession } from "@mariozechner/pi-coding-agent";
+
+const session = await createAgentSession({
+  model: "claude-sonnet-4-5",
+  cwd: "/path/to/project",
+  tools: ["bash", "read", "edit", "write"],
+});
+
+// 发送消息并获取流式响应
+for await (const event of session.send("帮我写一个 TODO app")) {
+  if (event.type === "message_update") {
+    process.stdout.write(event.text);
+  }
+}
+```
+
+**RPC 模式**使用 JSONL（JSON Lines）通过 stdin/stdout 与宿主进程通信：
+
+```jsonl
+→ {"type":"input","text":"修复这个 bug"}
+← {"type":"message_start","role":"assistant"}
+← {"type":"message_update","text":"让我"}
+← {"type":"message_update","text":"看看"}
+← {"type":"tool_call","name":"read","args":{"path":"src/bug.ts"}}
+← {"type":"tool_result","content":"..."}
+← {"type":"message_end"}
+```
+
+这种设计让 Pi 可以作为 VS Code 扩展、JetBrains 插件等 IDE 集成的后端。
+
+---
+
+## 8.8 动手：扩展实践
+
+### Demo 08 概览
+
+本章的配套 Demo 在 `demos/08-extensions/` 目录中，包含三个递进的示例。
+
+### Demo 08-01：审计扩展
+
+最简单的扩展模式 —— 监听 `tool_call` 事件，记录日志，拦截危险操作：
+
+```bash
+cd demos/08-extensions && npx tsx src/01-simple-extension.ts
+```
+
+```
+─── Audit Extension: Intercept & Block ───
+
+Processing 5 tool calls through audit extension...
+
+[AUDIT]  Allowed: read_file({"path":"readme.md"})
+[AUDIT]  Allowed: write_file({"path":"out.txt","content":"hello"})
+[BLOCKED] Tool "delete_database" is not allowed
+[BLOCKED] Input contains dangerous pattern: "rm -rf /"
+[AUDIT]  Allowed: search({"query":"TODO"})
+
+Audit log: 5 entries
+Blocked: 2
+Allowed: 3
+```
+
+核心模式：
+
+```typescript
+function auditExtension(ctx: ExtensionContext) {
+  ctx.on("tool_call", (event) => {
+    // 危险工具 → 返回 null（阻止执行）
+    if (BLOCKED_TOOLS.includes(event.name)) return null;
+
+    // 安全工具 → 返回 event（允许执行）
+    return event;
+  });
+}
+```
+
+### Demo 08-02：自定义工具扩展
+
+通过扩展 API 注册新工具，扩展 Agent 的能力而无需修改核心代码：
+
+```bash
+npx tsx src/02-custom-tool-ext.ts
+```
+
+```
+─── Custom Tool Extension: Add Capabilities ───
+
+[REGISTER] Tool "read_file" registered
+
+Before extension: [read_file]
+[REGISTER] Tool "timestamp" registered
+After extension:  [read_file, timestamp]
+
+[EXEC] timestamp(iso) => 2026-03-21T10:30:00.000Z
+[EXEC] timestamp(unix) => 1774277400
+[EXEC] timestamp(human) => Saturday, March 21, 2026 at 10:30 AM
+```
+
+这个 Demo 展示了 Pi 扩展的核心优势：**通过 `registerTool` 向 Agent 添加能力，核心代码零修改**。LLM 会在 system prompt 中看到新工具的描述和参数 schema，可以自主决定何时调用。
+
+### Demo 08-03：事件总线通信
+
+两个扩展通过 EventBus 通信 —— Extension A 记录历史，Extension B 订阅统计：
+
+```bash
+npx tsx src/03-event-bus.ts
+```
+
+```
+─── Event Bus: Extensions Communicating ───
+
+Simulating 5 tool executions...
+
+[HISTORY] Recording start: read_file
+[HISTORY] Recording end: read_file (12ms)
+[HISTORY] Recording start: search
+[HISTORY] Recording end: search (45ms)
+[HISTORY] Recording start: write_file
+[HISTORY] Recording end: write_file (8ms)
+[HISTORY] Recording start: run_command
+[HISTORY] Recording end: run_command (120ms)
+[HISTORY] Recording start: read_file
+[HISTORY] Recording end: read_file (15ms)
+
+Extension B requests stats from Extension A...
+
+--- Stats Report ---
+  Total calls:    5
+  Total duration: 200ms
+  Avg duration:   40ms
+  Success rate:   80%
+--------------------
+```
+
+核心模式：**扩展间不直接调用，而是通过 EventBus 松耦合通信**。
+
+```typescript
+// Extension A: 发布 stats
+bus.on("request_stats", () => {
+  bus.emit("stats_ready", { entries: history.length, history });
+});
+
+// Extension B: 订阅 stats
+bus.on("stats_ready", (data) => {
+  printStats(data.history);
+});
+```
+
+这种模式在 Pi 源码中通过 `pi.events` 暴露给扩展：
+
+```typescript
+// 真实 Pi 扩展中的使用方式
+export default function (pi: ExtensionAPI) {
+  // 扩展 A 发布
+  pi.on("tool_execution_end", (event, ctx) => {
+    pi.events.emit("audit:tool_completed", {
+      tool: event.toolName,
+      duration: Date.now() - startTime,
+    });
+  });
+}
+
+// 另一个扩展 B 订阅
+export default function (pi: ExtensionAPI) {
+  pi.events.on("audit:tool_completed", (data) => {
+    // 更新仪表盘、发送通知等
+  });
+}
+```
+
+---
+
+## 8.9 教程总结
+
+### 回顾：8 章学到了什么
+
+```
+Chapter 1: Agent 全景
+  └── 理解了 AI Agent 的核心概念：LLM + Tools + Loop = Agent
+
+Chapter 2: 核心循环
+  └── 深入了 while 循环 + switch 的极简设计
+  └── 理解了 turn、steering、follow-up 消息模式
+
+Chapter 3: 工具系统
+  └── Schema + Execute + Render 三层工具抽象
+  └── 并行执行、源序保序、Operations 分层
+
+Chapter 4: 流式处理
+  └── SSE 解析、状态机重组、背压控制
+  └── Provider Proxy 的带宽优化
+
+Chapter 5: 多模型支持
+  └── Provider 抽象层、消息格式转换
+  └── Thinking/Reasoning 的统一处理
+
+Chapter 6: 构建完整 Agent
+  └── System Prompt 动态构建
+  └── 会话持久化、上下文压缩、配置系统
+
+Chapter 7: 框架对比
+  └── Pi vs Claude Code vs LangChain vs Vercel AI SDK
+  └── 5 个通用设计模式
+
+Chapter 8: 进阶扩展 (本章)
+  └── 扩展系统、TUI/Web UI 架构
+  └── Skills、产品化考量
+```
+
+### 你现在理解了什么
+
+完成这 8 章学习后，你具备了以下能力：
+
+**架构理解**：你能读懂任何 Agent 框架的源码，因为你理解了底层的 5 大设计模式 —— Agent Loop、Tool Abstraction、Context Management、Streaming、Provider Abstraction。
+
+**实现能力**：你亲手构建了一个包含核心循环、工具系统、流式处理、多模型支持的完整 Agent。不是抄代码，而是理解了每个设计决策背后的 why。
+
+**工程判断**：你知道生产级 Agent 需要扩展系统、权限控制、错误恢复、上下文压缩、会话持久化等"看不见但不可少"的工程。你也知道什么时候应该用 Vercel AI SDK 快速出活，什么时候需要 Pi 级别的精细控制。
+
+**设计品味**：你看到了 Pi 在 TUI 渲染中对 IME 支持的极致细节，在扩展系统中对错误隔离的防御性设计，在 Session Tree 中对分支历史的创新交互。这些设计品味会影响你未来构建的每一个系统。
+
+### 下一步去哪里
+
+**贡献 Pi**：Pi 是完全开源的。现在你理解了它的架构，可以：
+- 为工具系统贡献新工具（Chapter 3 给了你所有需要的知识）
+- 编写扩展丰富生态（Chapter 8 教了你扩展 API）
+- 改进 Provider 支持新模型（Chapter 5 解释了 Provider 抽象层）
+- 修复 bug 或优化性能
+
+**构建自己的框架**：如果 Pi 的设计不完全匹配你的需求，你现在有足够的知识从零构建：
+- 从 Chapter 2 的 while 循环开始
+- 逐步叠加 Chapter 3-5 的能力
+- 参考 Chapter 6 的工程实践
+- 用 Chapter 7 的对比思维选择你的设计取舍
+
+**探索多 Agent 系统**：单个 Agent 的能力有上限。下一个前沿是多个 Agent 协作：
+- Orchestrator Agent 分配任务给 Worker Agents
+- Agent 间通过 EventBus 或 RPC 通信
+- 共享上下文窗口 vs 独立上下文的权衡
+- 这是 Pi 的 MOM（Chapter 8.6）的自然延伸
+
+### 最后
+
+Agent 技术正处于快速迭代期。你今天学到的具体 API 可能会变，但底层的设计模式不会 —— while 循环仍然是 Agent 的心脏，Schema 仍然是工具的语言，流式处理仍然是体验的关键。
+
+Pi 的源码是一本活教材。它的每一行代码都值得细读 —— 不是因为它完美，而是因为它的每个设计决策都有清晰的 trade-off。读懂这些 trade-off，你就能在自己的项目中做出更好的决策。
+
+感谢你完成了这个教程。现在，去构建你自己的 Agent 吧。
