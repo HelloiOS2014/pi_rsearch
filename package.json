@@ -10,7 +10,8 @@
     "build": "astro build",
     "preview": "astro preview",
     "remotion:dev": "cd remotion && npm run dev",
-    "validate-refs": "npx tsx scripts/validate-references.ts"
+    "validate-refs": "npx tsx scripts/validate-references.ts",
+    "render-videos": "cd remotion && npx tsx render-batch.ts"
   },
   "type": "module",
   "devDependencies": {

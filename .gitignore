@@ -1,6 +1,6 @@
 node_modules/
 dist/
 .astro/
-public/videos/*.mp4
+# public/videos/*.mp4  # Videos are checked in (core tutorial content)
 .env
 .env.local
