@@ -1,0 +1,16 @@
+{
+  "name": "pi-tutorial",
+  "private": true,
+  "workspaces": [
+    "demos/*",
+    "remotion"
+  ],
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "remotion:dev": "cd remotion && npm run dev",
+    "validate-refs": "npx tsx scripts/validate-references.ts"
+  },
+  "type": "module"
+}
