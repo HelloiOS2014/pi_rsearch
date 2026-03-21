@@ -1,0 +1,556 @@
+---
+title: "Agent 全景"
+chapter: 1
+description: "理解 Agent 核心定义，30 行代码写出最小 Agent，理解 Pi 整体架构"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+
+# Agent 全景
+
+本章目标：从零理解 Agent 是什么，看懂 Pi 的三层架构，最后用 30 行代码写出一个最小 Agent。
+
+---
+
+## 1.1 什么是 Agent
+
+### 一句话定义
+
+**Agent = LLM（决策者）+ Tools（执行者）+ Loop（协调者）**
+
+这不是三个独立概念的拼凑，而是一个完整的运行时系统。LLM 负责思考和决策，Tools 负责与外部世界交互，Loop 把两者粘合成一个持续运行的闭环。
+
+### ReAct 模式
+
+Agent 的核心运行模式是 **ReAct**（Reasoning + Acting）：
+
+1. **Reasoning**：LLM 分析当前状态，决定下一步做什么
+2. **Acting**：调用工具执行动作
+3. **Observing**：观察工具返回的结果
+4. **循环**：基于观察结果继续推理，直到任务完成
+
+```
+用户提问 → LLM 思考 → 调用工具 → 观察结果 → LLM 再思考 → 调用工具 → … → 最终回复
+```
+
+### 与 ChatBot 的本质区别
+
+Agent 不是"更聪明的 ChatBot"，是根本不同的范式：
+
+| | ChatBot | Agent |
+|---|---|---|
+| 交互模式 | 一问一答 | 自主执行多步任务 |
+| 工具使用 | 无 | 自主决定何时调用什么工具 |
+| 状态管理 | 无状态对话 | 维护执行上下文 |
+| 停止条件 | 回复即结束 | 任务完成才结束 |
+| 核心能力 | 生成文本 | **自主决策 + 执行动作** |
+
+Agent 的核心能力是 **自主决策**：它自己判断何时使用什么工具，观察结果后决定下一步行动。这不是预编程的 workflow，而是 LLM 在运行时动态规划的执行路径。
+
+---
+
+## 1.2 Pi 架构鸟瞰
+
+Pi 是一个开源的 coding agent，用 TypeScript 实现，代码量约 1,900 行核心代码。它的架构分为三层，每层职责清晰：
+
+```
+┌─────────────────────────────────────────────┐
+│  pi-coding-agent                            │
+│  7 个内置工具 · 扩展系统 · 会话管理         │
+├─────────────────────────────────────────────┤
+│  pi-agent-core                              │
+│  agentLoop() · Agent 类 · 12 种 AgentEvent  │
+├─────────────────────────────────────────────┤
+│  pi-ai                                      │
+│  20+ Provider · streamSimple() · 13 种事件  │
+└─────────────────────────────────────────────┘
+```
+
+### 第一层：pi-ai — 统一 LLM 接口
+
+这一层解决一个问题：**不同 LLM Provider 的 API 千差万别，如何用一套接口调用所有模型？**
+
+核心类型：
+
+<SourceReader
+  client:visible
+  code={`// Model — 描述一个 LLM 模型的所有信息
+export interface Model<TApi extends Api> {
+  id: string;
+  name: string;
+  api: TApi;
+  provider: Provider;
+  baseUrl: string;
+  reasoning: boolean;
+  input: ("text" | "image")[];
+  cost: {
+    input: number;   // $/million tokens
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+  };
+  contextWindow: number;
+  maxTokens: number;
+}
+
+// Tool — 工具的类型定义（注意：这里只有声明，没有执行逻辑）
+export interface Tool<TParameters extends TSchema = TSchema> {
+  name: string;
+  description: string;
+  parameters: TParameters;
+}
+
+// Message — LLM 对话中的三种消息
+export type Message = UserMessage | AssistantMessage | ToolResultMessage;`}
+  filename="packages/ai/src/types.ts"
+  language="typescript"
+  highlights={[
+    { line: 2, note: "Model 是泛型的：TApi 约束了这个模型使用哪种 API 协议" },
+    { line: 19, note: "Tool 在 pi-ai 层只是声明，execute 逻辑在 pi-agent-core 层添加" },
+    { line: 25, note: "三种消息角色：用户输入、助手回复、工具执行结果" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/types.ts"
+/>
+
+核心函数：`streamSimple()` 和 `completeSimple()` — 接收 Model + Context，返回流式事件或完整响应。
+
+pi-ai 支持 20+ Provider 的懒加载：
+
+<SourceReader
+  client:visible
+  code={`export type KnownProvider =
+  | "amazon-bedrock"
+  | "anthropic"
+  | "google"
+  | "google-gemini-cli"
+  | "google-vertex"
+  | "openai"
+  | "azure-openai-responses"
+  | "openai-codex"
+  | "github-copilot"
+  | "xai"
+  | "groq"
+  | "cerebras"
+  | "openrouter"
+  | "vercel-ai-gateway"
+  | "mistral"
+  | "minimax"
+  | "huggingface"
+  | "kimi-coding";
+  // ...还有更多`}
+  filename="packages/ai/src/types.ts"
+  language="typescript"
+  startLine={19}
+  highlights={[
+    { line: 20, note: "每个 Provider 都是懒加载的，只在首次使用时加载对应的适配器" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/types.ts#L19"
+/>
+
+流式事件系统 — 13 种 `AssistantMessageEvent` 覆盖完整的响应生命周期：
+
+<SourceReader
+  client:visible
+  code={`export type AssistantMessageEvent =
+  | { type: "start"; partial: AssistantMessage }
+  | { type: "text_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
+  | { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
+  | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
+  | { type: "done"; reason: StopReason; message: AssistantMessage }
+  | { type: "error"; reason: StopReason; error: AssistantMessage };`}
+  filename="packages/ai/src/types.ts"
+  language="typescript"
+  startLine={237}
+  highlights={[
+    { line: 240, note: "text_delta 是你在终端看到的逐字输出效果的来源" },
+    { line: 245, note: "toolcall 事件 — LLM 决定调用工具时触发" },
+    { line: 248, note: "done 和 error 是终止事件，标志一次 LLM 调用结束" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/types.ts#L237"
+/>
+
+### 第二层：pi-agent-core — Agent 运行时
+
+这一层把"调用 LLM"升级为"Agent 循环"。它提供两个层次的 API：
+
+**低层 API：`agentLoop()`** — 无状态的事件流函数
+
+<SourceReader
+  client:visible
+  code={`export function agentLoop(
+  prompts: AgentMessage[],
+  context: AgentContext,
+  config: AgentLoopConfig,
+  signal?: AbortSignal,
+  streamFn?: StreamFn,
+): EventStream<AgentEvent, AgentMessage[]> {
+  const stream = createAgentStream();
+
+  void runAgentLoop(
+    prompts, context, config,
+    async (event) => { stream.push(event); },
+    signal, streamFn,
+  ).then((messages) => { stream.end(messages); });
+
+  return stream;
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={31}
+  highlights={[
+    { line: 31, note: "agentLoop 是纯函数：输入 prompt + context + config，输出事件流" },
+    { line: 37, note: "返回 EventStream — 调用者通过 for-await-of 消费事件" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts#L31"
+/>
+
+**高层 API：`Agent` 类** — 带状态管理的完整运行时
+
+<SourceReader
+  client:visible
+  code={`export class Agent {
+  private _state: AgentState = {
+    systemPrompt: "",
+    model: getModel("google", "gemini-2.5-flash-lite-preview-06-17"),
+    thinkingLevel: "off",
+    tools: [],
+    messages: [],
+    isStreaming: false,
+    streamMessage: null,
+    pendingToolCalls: new Set<string>(),
+    error: undefined,
+  };
+
+  private listeners = new Set<(e: AgentEvent) => void>();
+  private abortController?: AbortController;
+  // ...
+}`}
+  filename="packages/agent/src/agent.ts"
+  language="typescript"
+  startLine={116}
+  highlights={[
+    { line: 117, note: "AgentState 包含了 Agent 运行所需的全部状态" },
+    { line: 119, note: "默认模型是 Gemini Flash — 便宜、快速，适合开发调试" },
+    { line: 129, note: "观察者模式：外部通过 listeners 订阅 AgentEvent" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent.ts#L116"
+/>
+
+**AgentTool** — 在 Tool 基础上增加了 `execute` 函数和 UI label：
+
+<SourceReader
+  client:visible
+  code={`// AgentTool extends Tool but adds the execute function
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any>
+  extends Tool<TParameters> {
+  // A human-readable label for the tool to be displayed in UI
+  label: string;
+  execute: (
+    toolCallId: string,
+    params: Static<TParameters>,
+    signal?: AbortSignal,
+    onUpdate?: AgentToolUpdateCallback<TDetails>,
+  ) => Promise<AgentToolResult<TDetails>>;
+}`}
+  filename="packages/agent/src/types.ts"
+  language="typescript"
+  startLine={273}
+  highlights={[
+    { line: 273, note: "AgentTool = Tool（声明）+ execute（执行）+ label（UI 展示）" },
+    { line: 278, note: "params 类型由 TypeBox TSchema 推导，完全类型安全" },
+    { line: 280, note: "onUpdate 支持流式更新 — 工具执行过程中可以实时推送进度" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/types.ts#L273"
+/>
+
+**12 种 AgentEvent** — 覆盖 Agent 的完整生命周期：
+
+<SourceReader
+  client:visible
+  code={`export type AgentEvent =
+  // Agent lifecycle
+  | { type: "agent_start" }
+  | { type: "agent_end"; messages: AgentMessage[] }
+  // Turn lifecycle
+  | { type: "turn_start" }
+  | { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+  // Message lifecycle
+  | { type: "message_start"; message: AgentMessage }
+  | { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
+  | { type: "message_end"; message: AgentMessage }
+  // Tool execution lifecycle
+  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+  | { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+  | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };`}
+  filename="packages/agent/src/types.ts"
+  language="typescript"
+  startLine={295}
+  highlights={[
+    { line: 296, note: "三层嵌套的生命周期：Agent > Turn > Message/Tool" },
+    { line: 300, note: "一个 Turn = 一次 LLM 回复 + 该回复触发的所有工具调用" },
+    { line: 304, note: "message_update 只在 assistant streaming 时触发，包含底层的 AssistantMessageEvent" }
+  ]}
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/types.ts#L295"
+/>
+
+### 第三层：pi-coding-agent — 完整的 Coding Agent
+
+这一层在 Agent 运行时之上，构建了一个可以读写代码、执行命令的完整 coding agent：
+
+- **7 个内置工具**：`read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`
+- **扩展系统**：通过配置文件添加自定义工具和 system prompt
+- **会话管理**：持久化对话历史，支持恢复中断的会话
+- **上下文压缩**：当对话超过 context window 时自动压缩
+- **3 种运行模式**：
+  - `Interactive`：终端交互模式（类似 Claude Code）
+  - `Print`：单次执行，输出结果后退出
+  - `RPC`：作为后端服务运行
+
+---
+
+## 1.3 5 分钟跑通 Pi
+
+### 安装
+
+```bash
+npm install -g @mariozechner/pi-coding-agent
+```
+
+### 配置 API Key
+
+Pi 支持多个 Provider，最常用的配置方式是环境变量：
+
+```bash
+# Anthropic（推荐）
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# OpenAI
+export OPENAI_API_KEY="sk-..."
+
+# Google
+export GOOGLE_API_KEY="AIza..."
+```
+
+### 第一次运行
+
+```bash
+# 启动交互模式
+pi
+
+# 或者直接执行一个任务（Print 模式）
+pi -p "创建一个 hello.ts 文件，内容是打印 Hello World"
+```
+
+### 观察输出
+
+运行上面的命令后，注意观察输出中的关键信息：
+
+```
+> 创建一个 hello.ts 文件，内容是打印 Hello World
+
+我来帮你创建这个文件。
+
+[tool_use: write]                    ← LLM 决定调用 write 工具
+  path: "hello.ts"
+  content: "console.log('Hello World')"
+
+[tool_result: success]               ← 工具执行成功
+
+文件 hello.ts 已创建完成。          ← LLM 观察到成功，结束任务
+```
+
+这个过程体现了 Agent 的核心模式：**LLM 自主决策使用 write 工具**，而不是你告诉它用哪个工具。
+
+---
+
+## 1.4 动手：30 行最小 Agent
+
+现在我们从零开始，分三步构建一个最小 Agent。通过对比，你会清晰地看到 Agent 和普通 LLM 调用的本质区别。
+
+### Step 1: 裸调 LLM
+
+最简单的 LLM 调用 — 发送一个问题，得到一个回复：
+
+```typescript
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+const response = await client.messages.create({
+  model: "claude-sonnet-4-5-20250514",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "什么是 Agent？" }],
+});
+console.log(response.content[0].text);
+```
+
+这就是一个 ChatBot — 一问一答，没有工具，没有循环。
+
+### Step 2: 加入工具定义
+
+给 LLM 提供工具定义，让它有能力"请求"调用工具：
+
+```typescript
+const tools = [{
+  name: "calculator",
+  description: "计算数学表达式",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      expression: { type: "string", description: "数学表达式" }
+    },
+    required: ["expression"]
+  }
+}];
+
+const response = await client.messages.create({
+  model: "claude-sonnet-4-5-20250514",
+  max_tokens: 1024,
+  tools,
+  messages: [{ role: "user", content: "计算 237 * 891 + 42" }],
+});
+
+// 关键！看 stop_reason
+console.log(response.stop_reason); // "tool_use" — LLM 决定调用工具！
+```
+
+注意 `stop_reason` 变成了 `"tool_use"` — LLM 没有直接回答，而是请求调用 calculator 工具。但此时工具并没有真正执行，因为缺少最关键的部分：**循环**。
+
+### Step 3: 完整 Agent Loop
+
+加上循环，就是一个完整的 Agent：
+
+```typescript
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+
+// 工具定义 + 执行逻辑
+const tools = [/* ... 同上 ... */];
+function executeMyTool(name: string, input: any): string {
+  if (name === "calculator") {
+    return String(eval(input.expression)); // 仅做演示！
+  }
+  return "Unknown tool";
+}
+
+// 🔥 Agent 的核心：一个 while 循环
+const messages: any[] = [{ role: "user", content: "计算 237 * 891 + 42" }];
+
+while (true) {
+  const response = await client.messages.create({
+    model: "claude-sonnet-4-5-20250514",
+    max_tokens: 1024,
+    tools,
+    messages,
+  });
+
+  // 追加 assistant 回复到上下文
+  messages.push({ role: "assistant", content: response.content });
+
+  // 没有工具调用 → 任务完成，退出循环
+  if (response.stop_reason !== "tool_use") break;
+
+  // 执行每个工具调用，将结果追加到上下文
+  const toolResults = [];
+  for (const block of response.content) {
+    if (block.type === "tool_use") {
+      const result = executeMyTool(block.name, block.input);
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: String(result),
+      });
+    }
+  }
+  messages.push({ role: "user", content: toolResults });
+}
+```
+
+### Step 1 vs Step 3 对比
+
+<CodeComparison client:visible
+  left={{
+    code: `// Step 1: 裸调 LLM — 一问一答
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+const response = await client.messages.create({
+  model: "claude-sonnet-4-5-20250514",
+  max_tokens: 1024,
+  messages: [
+    { role: "user", content: "什么是 Agent？" }
+  ],
+});
+
+console.log(response.content[0].text);
+
+// 特点：
+// - 单次调用，无循环
+// - 无工具
+// - LLM 只能生成文本
+// - 一问一答就结束`,
+    label: "Step 1: 裸调 LLM",
+    language: "typescript"
+  }}
+  right={{
+    code: `// Step 3: Agent Loop — 自主决策执行
+const messages = [{ role: "user", content: input }];
+
+while (true) {
+  const response = await client.messages.create({
+    model: "claude-sonnet-4-5-20250514",
+    max_tokens: 1024,
+    tools,
+    messages,
+  });
+
+  messages.push({
+    role: "assistant", content: response.content
+  });
+
+  if (response.stop_reason !== "tool_use") break;
+
+  const toolResults = [];
+  for (const block of response.content) {
+    if (block.type === "tool_use") {
+      const result = executeMyTool(block.name, block.input);
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: String(result),
+      });
+    }
+  }
+  messages.push({ role: "user", content: toolResults });
+}
+
+// 特点：
+// - while(true) 循环驱动
+// - LLM 自主决定调用工具
+// - 观察结果后继续推理
+// - 任务完成才退出`,
+    label: "Step 3: 完整 Agent Loop",
+    language: "typescript"
+  }}
+/>
+
+左右对比一目了然：**Agent 的本质就是加了一个 while 循环**。这个循环让 LLM 从"回答问题的工具"变成了"自主完成任务的 Agent"。
+
+---
+
+## 1.5 本章小结
+
+三个核心认知：
+
+1. **Agent 的本质是一个 while 循环** — 让 LLM 能够多轮调用工具、观察结果、持续推理
+2. **Pi 的三层架构**：`pi-ai`（统一 LLM 接口）→ `pi-agent-core`（Agent 运行时）→ `pi-coding-agent`（完整 Coding Agent）
+3. **Pi 用约 1,900 行核心代码证明了这个循环可以做到和 Claude Code 竞争** — 架构简洁不等于功能简单
+
+下一章，我们将深入 Pi 的核心循环实现 — `agentLoop()` 函数，看看从我们的 30 行 demo 到生产级 Agent，还需要解决哪些问题。
