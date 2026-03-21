@@ -1,0 +1,28 @@
+{
+  "name": "pi-tutorial-remotion",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "remotion studio",
+    "build": "remotion render",
+    "render-batch": "npx tsx render-batch.ts"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.435",
+    "@remotion/player": "4.0.435",
+    "@remotion/transitions": "^4.0.435",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-syntax-highlighter": "^16.1.1",
+    "remotion": "4.0.435",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@remotion/bundler": "4.0.435",
+    "@remotion/renderer": "4.0.435",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "typescript": "5.9.3"
+  }
+}
