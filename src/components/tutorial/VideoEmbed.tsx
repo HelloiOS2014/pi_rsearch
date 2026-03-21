@@ -67,13 +67,15 @@ export const VideoEmbed: React.FC<VideoEmbedProps> = ({
           )}
         </div>
 
-        {/* Video */}
+        {/* Video — autoplay muted loop, behaves like an animated diagram */}
         <video
           ref={videoRef}
           src={videoSrc}
-          controls
+          autoPlay
+          muted
+          loop
           playsInline
-          preload="metadata"
+          preload="auto"
           onError={() => setHasError(true)}
           onLoadedMetadata={() => setIsLoaded(true)}
           style={{
@@ -81,6 +83,7 @@ export const VideoEmbed: React.FC<VideoEmbedProps> = ({
             display: "block",
             backgroundColor: "#0a0a1a",
             opacity: isLoaded ? 1 : 0.5,
+            transition: "opacity 0.3s ease",
           }}
         />
       </div>
