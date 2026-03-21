@@ -1,0 +1,26 @@
+{
+  "name": "@pi-tutorial/demo-05-multi-model",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo:01": "npx tsx src/01-provider-adapter.ts",
+    "demo:02": "npx tsx src/02-unified-api.ts",
+    "demo:03": "npx tsx src/03-cross-provider.ts",
+    "demo:04": "npx tsx src/04-thinking-unify.ts",
+    "demo:05": "npx tsx src/05-cost-tracking.ts",
+    "demo:06": "npx tsx src/06-unicode-sanitize.ts",
+    "demo:07": "npx tsx src/07-oauth-flow.ts",
+    "demo:08": "npx tsx src/08-custom-model.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "openai": "^4.77.0",
+    "@pi-tutorial/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "tsx": "^4.19.0"
+  }
+}
