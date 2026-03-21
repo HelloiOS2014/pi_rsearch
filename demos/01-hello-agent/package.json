@@ -1,0 +1,20 @@
+{
+  "name": "@pi-tutorial/demo-01-hello-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo:01": "npx tsx src/01-raw-llm-call.ts",
+    "demo:02": "npx tsx src/02-add-tool-call.ts",
+    "demo:03": "npx tsx src/03-agent-loop.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@pi-tutorial/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "tsx": "^4.19.0"
+  }
+}
