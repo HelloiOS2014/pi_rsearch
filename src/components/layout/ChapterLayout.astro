@@ -1,0 +1,238 @@
+---
+import TutorialLayout from '../../layouts/TutorialLayout.astro';
+import Sidebar from './Sidebar.astro';
+import TableOfContents from './TableOfContents.astro';
+import Footer from './Footer.astro';
+import { getCollection } from 'astro:content';
+
+interface Heading {
+  depth: number;
+  slug: string;
+  text: string;
+}
+
+interface Props {
+  title: string;
+  description: string;
+  chapter: number;
+  currentSlug: string;
+  headings: Heading[];
+}
+
+const { title, description, chapter, currentSlug, headings } = Astro.props;
+
+// Get sorted chapters for prev/next navigation
+const allChapters = await getCollection('chapters');
+const chapters = allChapters
+  .filter((ch) => !ch.data.draft)
+  .sort((a, b) => a.data.chapter - b.data.chapter);
+
+const currentIndex = chapters.findIndex((ch) => ch.id === currentSlug);
+const prevChapter = currentIndex > 0 ? chapters[currentIndex - 1] : null;
+const nextChapter = currentIndex < chapters.length - 1 ? chapters[currentIndex + 1] : null;
+---
+
+<TutorialLayout title={title} description={description}>
+  <Sidebar currentSlug={currentSlug} />
+
+  <div class="chapter-wrapper">
+    <!-- Main content area -->
+    <main class="chapter-main">
+      <!-- Chapter header -->
+      <header class="chapter-header animate-fade-in-up">
+        <span class="chapter-badge">
+          第 {String(chapter).padStart(2, '0')} 章
+        </span>
+        <h1 class="chapter-title">{title}</h1>
+        <p class="chapter-desc">{description}</p>
+      </header>
+
+      <!-- MDX content -->
+      <article class="prose animate-fade-in-up" style="animation-delay: 0.1s;">
+        <slot />
+      </article>
+
+      <!-- Prev/Next navigation -->
+      <nav class="chapter-pager" aria-label="章节翻页">
+        {prevChapter ? (
+          <a href={`/${prevChapter.id}`} class="pager-link pager-prev">
+            <span class="pager-direction">上一章</span>
+            <span class="pager-title">
+              <span class="pager-num">{String(prevChapter.data.chapter).padStart(2, '0')}</span>
+              {prevChapter.data.title}
+            </span>
+          </a>
+        ) : (
+          <div />
+        )}
+        {nextChapter ? (
+          <a href={`/${nextChapter.id}`} class="pager-link pager-next">
+            <span class="pager-direction">下一章</span>
+            <span class="pager-title">
+              <span class="pager-num">{String(nextChapter.data.chapter).padStart(2, '0')}</span>
+              {nextChapter.data.title}
+            </span>
+          </a>
+        ) : (
+          <div />
+        )}
+      </nav>
+
+      <Footer />
+    </main>
+
+    <!-- Table of contents -->
+    <TableOfContents headings={headings} />
+  </div>
+</TutorialLayout>
+
+<style>
+  .chapter-wrapper {
+    margin-left: 260px;
+    min-height: 100vh;
+    display: flex;
+  }
+
+  .chapter-main {
+    flex: 1;
+    max-width: 48rem;
+    margin: 0 auto;
+    padding: 3rem 2rem 2rem;
+    min-width: 0;
+  }
+
+  /* ─── Chapter Header ─── */
+  .chapter-header {
+    margin-bottom: 2.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .chapter-badge {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--accent);
+    background: rgba(217, 119, 87, 0.1);
+    border: 1px solid rgba(217, 119, 87, 0.2);
+    border-radius: 4px;
+    padding: 0.2em 0.6em;
+    margin-bottom: 0.75rem;
+    letter-spacing: 0.02em;
+  }
+
+  .chapter-title {
+    font-family: 'DM Sans', system-ui, sans-serif;
+    font-size: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+    color: #f0f0f0;
+    margin-bottom: 0.5rem;
+  }
+
+  .chapter-desc {
+    font-size: 1.0625rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+
+  /* ─── Prev/Next Pager ─── */
+  .chapter-pager {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 4rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .pager-link {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 1rem 1.25rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    text-decoration: none;
+    transition: all 0.2s ease;
+  }
+
+  .pager-link:hover {
+    border-color: var(--accent);
+    background: rgba(217, 119, 87, 0.04);
+  }
+
+  .pager-next {
+    text-align: right;
+    align-items: flex-end;
+  }
+
+  .pager-direction {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 500;
+  }
+
+  .pager-title {
+    font-size: 0.9375rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+
+  .pager-next .pager-title {
+    justify-content: flex-end;
+  }
+
+  .pager-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--accent-deep);
+  }
+
+  /* ─── Responsive ─── */
+  @media (max-width: 1279px) {
+    .chapter-main {
+      padding-right: 2rem;
+    }
+  }
+
+  @media (max-width: 1023px) {
+    .chapter-wrapper {
+      margin-left: 0;
+    }
+
+    .chapter-main {
+      padding: 4rem 1.5rem 2rem;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .chapter-main {
+      padding: 4rem 1rem 1.5rem;
+    }
+
+    .chapter-title {
+      font-size: 1.75rem;
+    }
+
+    .chapter-pager {
+      grid-template-columns: 1fr;
+    }
+
+    .pager-next {
+      text-align: left;
+      align-items: flex-start;
+    }
+
+    .pager-next .pager-title {
+      justify-content: flex-start;
+    }
+  }
+</style>

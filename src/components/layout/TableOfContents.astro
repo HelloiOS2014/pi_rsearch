@@ -1,0 +1,97 @@
+---
+interface Heading {
+  depth: number;
+  slug: string;
+  text: string;
+}
+
+interface Props {
+  headings: Heading[];
+}
+
+const { headings } = Astro.props;
+const filtered = headings.filter((h) => h.depth === 2 || h.depth === 3);
+---
+
+{filtered.length > 0 && (
+  <aside class="toc" aria-label="本页目录">
+    <div class="toc-inner">
+      <p class="toc-label">本页内容</p>
+      <ul class="toc-list">
+        {filtered.map((heading) => (
+          <li>
+            <a
+              href={`#${heading.slug}`}
+              class:list={['toc-link', { 'toc-h3': heading.depth === 3 }]}
+            >
+              {heading.text}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  </aside>
+)}
+
+<style>
+  .toc {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 200px;
+    height: 100vh;
+    padding-top: 2.5rem;
+    display: none;
+  }
+
+  @media (min-width: 1280px) {
+    .toc {
+      display: block;
+    }
+  }
+
+  .toc-inner {
+    padding: 0 1rem 0 0.75rem;
+    border-left: 1px solid var(--border-subtle);
+    max-height: calc(100vh - 5rem);
+    overflow-y: auto;
+  }
+
+  .toc-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 0.75rem;
+    padding-left: 0.75rem;
+  }
+
+  .toc-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .toc-link {
+    display: block;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    margin-left: -1px;
+    transition: all 0.15s ease;
+  }
+
+  .toc-link:hover {
+    color: var(--text-primary);
+    border-left-color: var(--border);
+  }
+
+  .toc-h3 {
+    padding-left: 1.5rem;
+    font-size: 0.75rem;
+  }
+</style>

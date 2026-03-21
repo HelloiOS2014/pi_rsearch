@@ -1,0 +1,370 @@
+---
+import TutorialLayout from '../layouts/TutorialLayout.astro';
+import Footer from '../components/layout/Footer.astro';
+import { getCollection } from 'astro:content';
+
+const allChapters = await getCollection('chapters');
+const chapters = allChapters
+  .filter((ch) => !ch.data.draft)
+  .sort((a, b) => a.data.chapter - b.data.chapter);
+---
+
+<TutorialLayout title="Pi Agent 深度教程" description="从零开始掌握 AI Agent 开发，基于 Pi 框架的系统化学习路径">
+  <div class="landing">
+    <!-- Decorative background -->
+    <div class="bg-pattern" aria-hidden="true">
+      <div class="bg-grid"></div>
+      <div class="bg-glow"></div>
+    </div>
+
+    <!-- Hero -->
+    <header class="hero">
+      <div class="hero-badge animate-fade-in-up">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+          <path d="M2 12h20" />
+        </svg>
+        Pi Agent Tutorial
+      </div>
+
+      <h1 class="hero-title animate-fade-in-up" style="animation-delay: 0.08s;">
+        Pi Agent<br />
+        <span class="hero-accent">深度教程</span>
+      </h1>
+
+      <p class="hero-sub animate-fade-in-up" style="animation-delay: 0.16s;">
+        从零开始掌握 AI Agent 开发。<br class="hide-mobile" />
+        基于 Pi 框架，系统化构建你的第一个智能代理。
+      </p>
+
+      <div class="hero-actions animate-fade-in-up" style="animation-delay: 0.24s;">
+        <a href={chapters.length > 0 ? `/${chapters[0].id}` : '#chapters'} class="btn-primary">
+          开始学习
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 12h14" />
+            <path d="m12 5 7 7-7 7" />
+          </svg>
+        </a>
+        <a href="https://github.com/badlogic/pi-mono" target="_blank" rel="noopener noreferrer" class="btn-ghost">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+          </svg>
+          GitHub
+        </a>
+      </div>
+    </header>
+
+    <!-- Chapter List -->
+    <section id="chapters" class="chapters-section">
+      <h2 class="section-title animate-fade-in-up">
+        <span class="section-line" aria-hidden="true"></span>
+        章节目录
+        <span class="section-line" aria-hidden="true"></span>
+      </h2>
+
+      <div class="chapter-grid">
+        {chapters.map((chapter, i) => (
+          <a
+            href={`/${chapter.id}`}
+            class="chapter-card animate-fade-in-up"
+            style={`animation-delay: ${0.3 + i * 0.06}s;`}
+          >
+            <div class="card-top">
+              <span class="card-number">
+                {String(chapter.data.chapter).padStart(2, '0')}
+              </span>
+              <svg class="card-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M7 17 17 7" />
+                <path d="M7 7h10v10" />
+              </svg>
+            </div>
+            <h3 class="card-title">{chapter.data.title}</h3>
+            <p class="card-desc">{chapter.data.description}</p>
+          </a>
+        ))}
+      </div>
+    </section>
+
+    <Footer />
+  </div>
+</TutorialLayout>
+
+<style>
+  .landing {
+    position: relative;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ─── Background Pattern ─── */
+  .bg-pattern {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .bg-grid {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+    background-size: 64px 64px;
+    mask-image: radial-gradient(ellipse 60% 50% at 50% 30%, black, transparent);
+  }
+
+  .bg-glow {
+    position: absolute;
+    top: -20%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 800px;
+    height: 600px;
+    border-radius: 50%;
+    background: radial-gradient(
+      ellipse,
+      rgba(217, 119, 87, 0.08) 0%,
+      rgba(217, 119, 87, 0.02) 40%,
+      transparent 70%
+    );
+  }
+
+  /* ─── Hero ─── */
+  .hero {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 10rem 2rem 5rem;
+    max-width: 52rem;
+    margin: 0 auto;
+  }
+
+  .hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--accent);
+    background: rgba(217, 119, 87, 0.08);
+    border: 1px solid rgba(217, 119, 87, 0.2);
+    border-radius: 100px;
+    padding: 0.375rem 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .hero-title {
+    font-family: 'DM Sans', system-ui, sans-serif;
+    font-size: clamp(2.75rem, 7vw, 4.5rem);
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.04em;
+    color: #f5f5f5;
+    margin-bottom: 1.5rem;
+  }
+
+  .hero-accent {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-warm) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero-sub {
+    font-size: 1.125rem;
+    line-height: 1.7;
+    color: var(--text-secondary);
+    max-width: 32rem;
+    margin-bottom: 2.5rem;
+  }
+
+  .hide-mobile {
+    display: none;
+  }
+
+  @media (min-width: 640px) {
+    .hide-mobile {
+      display: inline;
+    }
+  }
+
+  .hero-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1.75rem;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border-radius: 8px;
+    text-decoration: none;
+    transition: all 0.2s ease;
+    box-shadow: 0 0 0 0 rgba(217, 119, 87, 0);
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-warm);
+    box-shadow: 0 4px 20px rgba(217, 119, 87, 0.3);
+    transform: translateY(-1px);
+  }
+
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.9375rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    text-decoration: none;
+    transition: all 0.2s ease;
+  }
+
+  .btn-ghost:hover {
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  /* ─── Chapter Section ─── */
+  .chapters-section {
+    position: relative;
+    max-width: 56rem;
+    margin: 0 auto;
+    padding: 0 2rem 4rem;
+  }
+
+  .section-title {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    margin-bottom: 2.5rem;
+  }
+
+  .section-line {
+    display: block;
+    width: 3rem;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .chapter-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 1rem;
+  }
+
+  .chapter-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    padding: 1.5rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    text-decoration: none;
+    transition: all 0.2s ease;
+    overflow: hidden;
+  }
+
+  .chapter-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(217, 119, 87, 0.06) 0%, transparent 60%);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  .chapter-card:hover {
+    border-color: rgba(217, 119, 87, 0.3);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+
+  .chapter-card:hover::before {
+    opacity: 1;
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.875rem;
+  }
+
+  .card-number {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+
+  .card-arrow {
+    color: var(--text-muted);
+    opacity: 0;
+    transform: translate(-4px, 4px);
+    transition: all 0.2s ease;
+  }
+
+  .chapter-card:hover .card-arrow {
+    opacity: 1;
+    transform: translate(0, 0);
+  }
+
+  .card-title {
+    position: relative;
+    font-size: 1.0625rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.375rem;
+    line-height: 1.3;
+  }
+
+  .card-desc {
+    position: relative;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* ─── Responsive ─── */
+  @media (max-width: 640px) {
+    .hero {
+      padding: 6rem 1.25rem 3rem;
+    }
+
+    .chapters-section {
+      padding: 0 1.25rem 3rem;
+    }
+
+    .chapter-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
