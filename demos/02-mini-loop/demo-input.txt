@@ -1,0 +1,10 @@
+Line 1: The agent loop is the heartbeat of every AI agent.
+Line 2: Each iteration gives the LLM a chance to think and act.
+Line 3: Tools are how agents interact with the real world.
+Line 4: The loop continues until the LLM decides it's done.
+Line 5: stop_reason tells us why the LLM stopped generating.
+Line 6: "end_turn" means the LLM is finished voluntarily.
+Line 7: "tool_use" means the LLM wants to call a tool.
+Line 8: Tool results are sent back as the next user message.
+Line 9: This cycle of think-act-observe IS the agent pattern.
+Line 10: Understanding the loop is understanding agents.

@@ -1,0 +1,23 @@
+{
+  "name": "@pi-tutorial/demo-02-mini-loop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo:01": "npx tsx src/01-single-turn.ts",
+    "demo:02": "npx tsx src/02-multi-turn.ts",
+    "demo:03": "npx tsx src/03-with-events.ts",
+    "demo:04": "npx tsx src/04-steering.ts",
+    "demo:05": "npx tsx src/05-abort.ts",
+    "demo:06": "npx tsx src/06-edge-cases.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@pi-tutorial/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "tsx": "^4.19.0"
+  }
+}
