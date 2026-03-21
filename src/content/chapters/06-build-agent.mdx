@@ -50,7 +50,7 @@ import VideoEmbed from '../../components/tutorial/VideoEmbed';
     { line: 32, note: "contextFiles 是项目级 .pi/ 目录下的指令文件，自动注入 prompt" },
     { line: 34, note: "skills 是可激活的能力模块，格式化后追加到 prompt 末尾" }
   ]}
-  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/system-prompt.ts#L19"
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/system-prompt.ts#L19"
 />
 
 ### Prompt 的五个区域
@@ -120,7 +120,7 @@ if (hasRead && hasEdit) {
     { line: 118, note: "条件逻辑：如果有专用搜索工具，就引导 LLM 优先使用它们而非 bash grep" },
     { line: 123, note: "只有同时启用 read 和 edit 时才注入 'read before edit' 规则" }
   ]}
-  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/system-prompt.ts#L108"
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/system-prompt.ts#L108"
 />
 
 **为什么这很重要？** 一个仅开放 bash 工具的受限 Agent 和一个全功能 Agent 需要完全不同的使用指引。静态 prompt 做不到这种自适应 —— 要么过度约束（写了没用的规则），要么约束不足（缺少关键指引）。Pi 的动态方案让 prompt 永远只包含当前相关的内容。
@@ -214,7 +214,7 @@ export type SessionEntry =
     { line: 53, note: "CompactionEntry 存储压缩后的摘要，下次加载时代替被压缩的消息" },
     { line: 56, note: "CustomEntry vs CustomMessageEntry: 前者只存数据不进 LLM 上下文，后者两者皆有" }
   ]}
-  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/session-manager.ts#L43"
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/session-manager.ts#L43"
 />
 
 **为什么是树而不是列表？** 因为 Pi 支持 **Fork** 操作 —— 在对话的任意节点创建分支，尝试不同的方案。树结构让每个分支都是根到叶的一条路径，多个分支共享公共前缀，不需要复制消息。
@@ -274,7 +274,7 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
     { line: 225, note: "v2→v3: 重命名 hookMessage → custom，反映扩展系统的 API 演进" },
     { line: 237, note: "渐进式迁移：检查当前版本号，按需执行每一步迁移" }
   ]}
-  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/session-manager.ts#L208"
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/session-manager.ts#L208"
 />
 
 ### buildSessionContext：从树到线性消息
@@ -426,7 +426,7 @@ export function estimateTokens(message: AgentMessage): number {
     { line: 244, note: "assistant 消息要算 thinking block — 这些也占 token 空间" },
     { line: 246, note: "toolCall 参数序列化为 JSON 后计算长度 — 因为传给 API 时就是 JSON" }
   ]}
-  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/compaction/compaction.ts#L225"
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/compaction/compaction.ts#L225"
 />
 
 为什么用 `chars / 4` 而不是精确的 tokenizer？因为精确 tokenization 需要加载 tokenizer 模型（数 MB），而且不同模型的 tokenizer 不同。`chars / 4` 在英文中非常接近实际值（英文平均 1 token ≈ 4 chars），在中文中会高估（中文 1 字 ≈ 1-2 token），但高估是安全的 —— 最多提前压缩，不会溢出。
@@ -483,7 +483,7 @@ function findValidCutPoints(
     { line: 300, note: "user 和 assistant 是最自然的切点 — 一轮对话的边界" },
     { line: 302, note: "bashExecution 被当作 user 消息处理 — 它是用户发起的执行" }
   ]}
-  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/compaction/compaction.ts#L292"
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/compaction/compaction.ts#L292"
 />
 
 ### 压缩流程
@@ -618,7 +618,7 @@ private _isRetryableError(message: AssistantMessage): boolean {
     { line: 2338, note: "关键区分：context overflow 不走重试，走 compaction — 重试只会浪费时间" },
     { line: 2342, note: "用正则匹配错误消息 — 覆盖所有常见的瞬态错误模式" }
   ]}
-  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/agent-session.ts#L2334"
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/agent-session.ts#L2334"
 />
 
 **错误分类**是关键。Pi 把错误分为三类：
@@ -784,7 +784,7 @@ Pi 的配置使用三级合并：Global → Project → CLI，优先级从低到
     { line: 71, note: "compaction/retry 设置: 第 6.3 和 6.4 节学到的机制的配置旋钮" },
     { line: 79, note: "packages/extensions/skills: 扩展生态的入口 — 加载外部能力" }
   ]}
-  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/settings-manager.ts#L63"
+  githubUrl="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/settings-manager.ts#L63"
 />
 
 ### 深度合并
