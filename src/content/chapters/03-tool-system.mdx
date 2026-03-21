@@ -1,0 +1,1090 @@
+---
+title: "工具系统"
+chapter: 3
+description: "理解工具定义、验证、执行完整链路，并行 vs 顺序执行，钩子系统"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+import VideoEmbed from '../../components/tutorial/VideoEmbed';
+
+# 工具系统
+
+本章目标：深入理解 Pi 工具系统的完整生命周期 —— 从 TypeBox Schema 定义、AJV 验证、并行/顺序执行，到 before/after 钩子系统。掌握工具系统后，你就理解了 Agent 与外部世界交互的全部机制。
+
+---
+
+## 3.1 工具类型体系
+
+### AgentTool：工具的完整定义
+
+回忆第一章：`pi-ai` 层的 `Tool` 只有声明（name + description + parameters），没有执行逻辑。`pi-agent-core` 层通过 `AgentTool` 接口补上了关键的 `execute` 函数：
+
+<SourceReader
+  client:visible
+  code={`// AgentTool extends Tool but adds the execute function
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
+  // A human-readable label for the tool to be displayed in UI
+  label: string;
+  execute: (
+    toolCallId: string,
+    params: Static<TParameters>,
+    signal?: AbortSignal,
+    onUpdate?: AgentToolUpdateCallback<TDetails>,
+  ) => Promise<AgentToolResult<TDetails>>;
+}`}
+  filename="packages/agent/src/types.ts"
+  language="typescript"
+  startLine={272}
+  highlights={[
+    { line: 273, note: "两个泛型参数：TParameters 约束输入 Schema，TDetails 约束 UI 元数据" },
+    { line: 275, note: "label 是给人看的显示名，和 name (给 LLM 看的标识符) 分离" },
+    { line: 277, note: "toolCallId 用于关联 LLM 的调用请求和工具执行结果" },
+    { line: 278, note: "Static<TParameters> — TypeBox 的类型魔法，从 Schema 推导出 TS 类型" },
+    { line: 279, note: "signal 支持取消：用户按 Ctrl+C 时优雅中止工具执行" },
+    { line: 280, note: "onUpdate 回调：工具执行过程中流式报告进度" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/types.ts#L272"
+/>
+
+注意 `execute` 的四个参数，每个都有明确的职责：
+
+| 参数 | 类型 | 用途 |
+|------|------|------|
+| `toolCallId` | `string` | 关联 LLM 请求与工具结果 |
+| `params` | `Static<TParameters>` | 经过 AJV 验证后的合法参数 |
+| `signal` | `AbortSignal?` | 支持用户中断 |
+| `onUpdate` | callback | 流式进度报告（如 bash 的实时输出） |
+
+### AgentToolResult：工具返回值
+
+工具执行完成后返回一个精心设计的结构体：
+
+<SourceReader
+  client:visible
+  code={`export interface AgentToolResult<T> {
+  // Content blocks supporting text and images
+  content: (TextContent | ImageContent)[];
+  // Details to be displayed in a UI or logged
+  details: T;
+}
+
+// Callback for streaming tool execution updates
+export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;`}
+  filename="packages/agent/src/types.ts"
+  language="typescript"
+  startLine={262}
+  highlights={[
+    { line: 264, note: "content 发送给 LLM 作为工具结果 — 支持文本和图片" },
+    { line: 266, note: "details 只给 UI 用，不发送给 LLM — 如 diff 预览、截断信息等" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/types.ts#L262"
+/>
+
+**content vs details 的分离是核心设计决策**：
+
+- `content` 是发送给 LLM 的内容，直接影响 LLM 的下一步决策
+- `details` 是 UI 元数据，用于渲染、日志、调试，但 **不会发送给 LLM**
+
+这意味着工具可以告诉 LLM "Successfully replaced text in file.ts"（简洁的 content），同时给 UI 发送完整的 diff 预览（丰富的 details）。LLM 不需要处理大量的 diff 信息，UI 却能展示完整的变更。
+
+### 为什么选择 TypeBox 而不是 Zod？
+
+Pi 使用 `@sinclair/typebox` 而不是更流行的 Zod 来定义工具参数 Schema。原因很直接：
+
+```typescript
+import { Type, type Static } from '@sinclair/typebox';
+
+// TypeBox：定义一次，自动得到 JSON Schema + TypeScript 类型
+const bashSchema = Type.Object({
+  command: Type.String({ description: "Bash command to execute" }),
+  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
+});
+
+// Static<T> 从 Schema 推导出 TypeScript 类型
+type BashInput = Static<typeof bashSchema>;
+// 等价于: { command: string; timeout?: number }
+```
+
+**TypeBox 直接生成标准 JSON Schema**，这正是 LLM API（OpenAI、Anthropic 等）需要的格式。Zod 虽然 API 更优雅，但需要额外的 `zod-to-json-schema` 转换步骤，且转换可能丢失 `description` 等元数据。
+
+对于 Agent 工具系统来说，JSON Schema 不是可选的附加功能，而是与 LLM 通信的核心协议。TypeBox 的 "Schema-first" 设计正好匹配这个需求。
+
+### AJV 验证：类型安全的最后防线
+
+LLM 返回的参数是 JSON，可能存在类型错误。Pi 使用 AJV 进行运行时验证：
+
+<SourceReader
+  client:visible
+  code={`// Create a singleton AJV instance with formats
+const ajv = new Ajv({
+  allErrors: true,   // 收集所有错误，而非在第一个错误时停止
+  strict: false,     // 允许 TypeBox 的扩展关键字（如 description）
+  coerceTypes: true,  // "42" → 42 自动类型转换
+});
+addFormats(ajv);
+
+export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
+  // Compile the schema.
+  const validate = ajv.compile(tool.parameters);
+
+  // Clone arguments so AJV can safely mutate for type coercion
+  const args = structuredClone(toolCall.arguments);
+
+  // Validate the arguments (AJV mutates args in-place for type coercion)
+  if (validate(args)) {
+    return args;
+  }
+
+  // Format validation errors nicely
+  const errors = validate.errors
+    ?.map((err: any) => {
+      const path = err.instancePath
+        ? err.instancePath.substring(1)
+        : err.params.missingProperty || "root";
+      return \`  - \${path}: \${err.message}\`;
+    })
+    .join("\\n") || "Unknown validation error";
+
+  throw new Error(
+    \`Validation failed for tool "\${toolCall.name}":\\n\${errors}\`
+  );
+}`}
+  filename="packages/ai/src/utils/validation.ts"
+  language="typescript"
+  highlights={[
+    { line: 4, note: "allErrors=true: 一次报告所有验证错误，帮助 LLM 在重试时修正所有问题" },
+    { line: 5, note: "strict=false: 必须关闭，否则 TypeBox 的 description 等扩展字段会被视为错误" },
+    { line: 6, note: "coerceTypes=true: LLM 可能返回 \"42\" 而非 42，AJV 自动转换" },
+    { line: 13, note: "structuredClone: 深拷贝参数，因为 AJV 的 coercion 会原地修改对象" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/ai/src/utils/validation.ts"
+/>
+
+三个关键配置的设计考量：
+
+1. **`coerceTypes: true`** — LLM 有时会把数字作为字符串返回（`"42"` 而不是 `42`），开启类型强制转换后 AJV 自动处理这种差异
+2. **`allErrors: true`** — 如果参数有 3 个错误，一次性全部报告，让 LLM 在下次重试时能修正所有问题
+3. **`strict: false`** — TypeBox 在 JSON Schema 中添加了 `description`、`default` 等扩展字段，strict 模式会拒绝这些字段
+
+---
+
+## 3.2 内置工具解剖
+
+Pi 内置了 7 个工具，覆盖了 coding agent 的核心操作：
+
+| 工具 | 功能 | 关键特性 |
+|------|------|----------|
+| `bash` | 执行 shell 命令 | 进程树清理、输出截断、超时 |
+| `edit` | 精确文本替换 | 模糊匹配、唯一性检查、BOM 保留 |
+| `write` | 创建/覆盖文件 | 文件变更队列 |
+| `read` | 读取文件内容 | 头部截断 |
+| `grep` | 搜索文件内容 | 行长截断 |
+| `find` | 查找文件 | glob 匹配 |
+| `ls` | 列出目录 | 简洁输出 |
+
+接下来深入剖析 bash 和 edit —— 两个最复杂也最核心的工具。
+
+### Bash 工具：进程管理与输出截断
+
+Bash 工具看似简单（执行一条命令），实际需要处理大量边界情况：
+
+<SourceReader
+  client:visible
+  code={`const bashSchema = Type.Object({
+  command: Type.String({ description: "Bash command to execute" }),
+  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+});
+
+export interface BashToolDetails {
+  truncation?: TruncationResult;
+  fullOutputPath?: string;
+}
+
+export interface BashOperations {
+  exec: (
+    command: string,
+    cwd: string,
+    options: {
+      onData: (data: Buffer) => void;
+      signal?: AbortSignal;
+      timeout?: number;
+      env?: NodeJS.ProcessEnv;
+    },
+  ) => Promise<{ exitCode: number | null }>;
+}`}
+  filename="packages/coding-agent/src/core/tools/bash.ts"
+  language="typescript"
+  startLine={20}
+  highlights={[
+    { line: 20, note: "TypeBox Schema — 只有 command 和可选的 timeout" },
+    { line: 26, note: "details 包含截断信息，UI 用来显示 '输出被截断' 的提示" },
+    { line: 27, note: "fullOutputPath: 超出 50KB 时完整输出写入 /tmp 临时文件" },
+    { line: 30, note: "BashOperations 接口 — 可插拔的策略模式" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/tools/bash.ts#L20"
+/>
+
+**进程树清理**：bash 命令可能启动子进程（如 `npm start` 启动 node 服务），简单地 kill 主进程会留下僵尸子进程。Pi 通过 `killProcessTree` 杀掉整个进程树：
+
+```typescript
+// spawn 使用 detached: true 创建新进程组
+const child = spawn(shell, [...args, command], {
+  cwd,
+  detached: true,    // 创建新进程组，便于整体清理
+  env: env ?? getShellEnv(),
+  stdio: ["ignore", "pipe", "pipe"],
+});
+
+// 超时或取消时，杀掉整个进程树
+const onAbort = () => {
+  if (child.pid) {
+    killProcessTree(child.pid);  // 不是 child.kill()，而是整个进程树
+  }
+};
+```
+
+**输出截断策略**：LLM 有上下文窗口限制，不能把 10MB 的构建日志全部塞进去。Pi 采用**滚动缓冲区 + 尾部截断**策略：
+
+<SourceReader
+  client:visible
+  code={`// 截断限制
+export const DEFAULT_MAX_LINES = 2000;
+export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
+
+// Bash 工具的输出处理
+const chunks: Buffer[] = [];
+let chunksBytes = 0;
+const maxChunksBytes = DEFAULT_MAX_BYTES * 2;  // 保留 2 倍，确保截断有足够素材
+
+const handleData = (data: Buffer) => {
+  totalBytes += data.length;
+
+  // 超过 50KB 时开始写入临时文件
+  if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
+    tempFilePath = getTempFilePath();
+    tempFileStream = createWriteStream(tempFilePath);
+    for (const chunk of chunks) {
+      tempFileStream.write(chunk);
+    }
+  }
+
+  // 写入临时文件
+  if (tempFileStream) {
+    tempFileStream.write(data);
+  }
+
+  // 维护滚动缓冲区
+  chunks.push(data);
+  chunksBytes += data.length;
+
+  // 淘汰旧的 chunk
+  while (chunksBytes > maxChunksBytes && chunks.length > 1) {
+    const removed = chunks.shift()!;
+    chunksBytes -= removed.length;
+  }
+};`}
+  filename="packages/coding-agent/src/core/tools/bash.ts"
+  language="typescript"
+  highlights={[
+    { line: 3, note: "50KB 限制 — 大约是 2000 行代码的量，对 LLM 决策足够" },
+    { line: 7, note: "保留 2 倍容量确保尾部截断时有足够的行" },
+    { line: 14, note: "超限时自动开始写入 /tmp/pi-bash-xxxx.log 临时文件" },
+    { line: 31, note: "滚动窗口：只保留最新的输出，老数据被淘汰" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/tools/bash.ts#L193"
+/>
+
+为什么 bash 用**尾部截断**（保留最后 N 行），而 read 工具用**头部截断**（保留前 N 行）？因为 bash 的关键信息（错误消息、构建结果）通常在末尾，而文件内容的关键信息（import、类定义）通常在开头。
+
+### Edit 工具：四级模糊匹配
+
+Edit 工具是 coding agent 的核心 —— 精确修改文件内容。挑战在于 LLM 提供的 `oldText` 可能与文件内容存在微妙差异（Unicode 引号、尾部空格等）。Pi 采用**两步匹配策略**：先尝试精确匹配，失败后进行模糊匹配：
+
+<SourceReader
+  client:visible
+  code={`export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
+  // Try exact match first
+  const exactIndex = content.indexOf(oldText);
+  if (exactIndex !== -1) {
+    return {
+      found: true,
+      index: exactIndex,
+      matchLength: oldText.length,
+      usedFuzzyMatch: false,
+      contentForReplacement: content,
+    };
+  }
+
+  // Try fuzzy match - work entirely in normalized space
+  const fuzzyContent = normalizeForFuzzyMatch(content);
+  const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+  const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
+
+  if (fuzzyIndex === -1) {
+    return { found: false, index: -1, matchLength: 0,
+             usedFuzzyMatch: false, contentForReplacement: content };
+  }
+
+  // When fuzzy matching, we work in the normalized space for replacement
+  return {
+    found: true,
+    index: fuzzyIndex,
+    matchLength: fuzzyOldText.length,
+    usedFuzzyMatch: true,
+    contentForReplacement: fuzzyContent,
+  };
+}`}
+  filename="packages/coding-agent/src/core/tools/edit-diff.ts"
+  language="typescript"
+  startLine={79}
+  highlights={[
+    { line: 81, note: "第一步：尝试精确匹配（最快路径）" },
+    { line: 93, note: "第二步：精确匹配失败后进入模糊匹配" },
+    { line: 94, note: "normalizeForFuzzyMatch 处理所有 Unicode 差异" },
+    { line: 104, note: "模糊匹配时在标准化空间里做替换" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/tools/edit-diff.ts#L79"
+/>
+
+`normalizeForFuzzyMatch` 进行四个层级的标准化：
+
+<SourceReader
+  client:visible
+  code={`export function normalizeForFuzzyMatch(text: string): string {
+  return (
+    text
+      .normalize("NFKC")
+      // 1. Strip trailing whitespace per line
+      .split("\\n")
+      .map((line) => line.trimEnd())
+      .join("\\n")
+      // 2. Smart single quotes → '
+      .replace(/[\\u2018\\u2019\\u201A\\u201B]/g, "'")
+      // 3. Smart double quotes → "
+      .replace(/[\\u201C\\u201D\\u201E\\u201F]/g, '"')
+      // 4. Various dashes/hyphens → -
+      .replace(/[\\u2010\\u2011\\u2012\\u2013\\u2014\\u2015\\u2212]/g, "-")
+      // 5. Special spaces → regular space
+      .replace(/[\\u00A0\\u2002-\\u200A\\u202F\\u205F\\u3000]/g, " ")
+  );
+}`}
+  filename="packages/coding-agent/src/core/tools/edit-diff.ts"
+  language="typescript"
+  startLine={34}
+  highlights={[
+    { line: 36, note: "NFKC 标准化：处理不同 Unicode 编码形式" },
+    { line: 38, note: "第 1 级：去除行尾空白 — 最常见的差异来源" },
+    { line: 41, note: "第 2 级：智能引号 → ASCII 引号" },
+    { line: 44, note: "第 3 级：智能双引号 → ASCII 双引号" },
+    { line: 46, note: "第 4 级：各种 Unicode 破折号 → ASCII 连字符" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/tools/edit-diff.ts#L34"
+/>
+
+**唯一性检查**：即使找到了匹配，如果 `oldText` 在文件中出现多次，edit 工具会拒绝执行。这避免了意外修改错误的位置：
+
+```typescript
+const occurrences = fuzzyContent.split(fuzzyOldText).length - 1;
+if (occurrences > 1) {
+  reject(new Error(
+    `Found ${occurrences} occurrences of the text in ${path}. ` +
+    `The text must be unique. Please provide more context to make it unique.`
+  ));
+}
+```
+
+**BOM 和行尾保留**：
+
+```typescript
+// BOM (Byte Order Mark) 处理：LLM 不会在 oldText 中包含不可见的 BOM
+const { bom, text: content } = stripBom(rawContent);
+
+// 检测原始行尾风格 (CRLF vs LF)
+const originalEnding = detectLineEnding(content);
+
+// 所有匹配在 LF 空间进行，写回时恢复原始行尾
+const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+await ops.writeFile(absolutePath, finalContent);
+```
+
+### 可插拔的 Operations 接口
+
+注意 bash 和 edit 工具都定义了 Operations 接口（`BashOperations`、`EditOperations`）。这是一个精心设计的**策略模式**：
+
+<CodeComparison
+  client:visible
+  left={{
+    label: "BashOperations",
+    language: "typescript",
+    code: `export interface BashOperations {
+  exec: (
+    command: string,
+    cwd: string,
+    options: {
+      onData: (data: Buffer) => void;
+      signal?: AbortSignal;
+      timeout?: number;
+      env?: NodeJS.ProcessEnv;
+    },
+  ) => Promise<{ exitCode: number | null }>;
+}
+
+// 使用时传入自定义实现
+createBashTool(cwd, {
+  operations: myRemoteBashOps
+});`
+  }}
+  right={{
+    label: "EditOperations",
+    language: "typescript",
+    code: `export interface EditOperations {
+  readFile: (path: string) => Promise<Buffer>;
+  writeFile: (path: string, content: string)
+    => Promise<void>;
+  access: (path: string) => Promise<void>;
+}
+
+// 默认实现：本地文件系统
+const defaultEditOperations = {
+  readFile: (p) => fsReadFile(p),
+  writeFile: (p, c) => fsWriteFile(p, c, "utf-8"),
+  access: (p) => fsAccess(p, R_OK | W_OK),
+};`
+  }}
+/>
+
+通过替换 Operations 实现，同一个工具可以运行在完全不同的环境：
+
+- **本地执行**：默认实现，直接调用 Node.js 的 `child_process` 和 `fs`
+- **SSH 远程执行**：Operations 通过 SSH 连接转发命令和文件操作
+- **Docker 沙箱**：Operations 在容器内执行，隔离风险操作
+- **测试 Mock**：Operations 返回预设结果，无需真实文件系统
+
+### 文件变更队列：同文件串行，不同文件并行
+
+当 LLM 一次请求多个 edit 操作时，如果两个 edit 修改同一个文件，并行执行会导致竞态条件。Pi 通过 `withFileMutationQueue` 解决这个问题：
+
+<SourceReader
+  client:visible
+  code={`const fileMutationQueues = new Map<string, Promise<void>>();
+
+async function getMutationQueueKey(filePath: string): Promise<string> {
+  const resolvedPath = resolve(filePath);
+  try {
+    return await realpath(resolvedPath);  // 解析符号链接
+  } catch {
+    return resolvedPath;
+  }
+}
+
+export async function withFileMutationQueue<T>(
+  filePath: string, fn: () => Promise<T>
+): Promise<T> {
+  const key = await getMutationQueueKey(filePath);
+  const currentQueue = fileMutationQueues.get(key) ?? Promise.resolve();
+
+  let releaseNext!: () => void;
+  const nextQueue = new Promise<void>((resolveQueue) => {
+    releaseNext = resolveQueue;
+  });
+  const chainedQueue = currentQueue.then(() => nextQueue);
+  fileMutationQueues.set(key, chainedQueue);
+
+  await currentQueue;
+  try {
+    return await fn();
+  } finally {
+    releaseNext();
+    if (fileMutationQueues.get(key) === chainedQueue) {
+      fileMutationQueues.delete(key);
+    }
+  }
+}`}
+  filename="packages/coding-agent/src/core/tools/file-mutation-queue.ts"
+  language="typescript"
+  highlights={[
+    { line: 1, note: "以文件路径为 key 的队列 Map — 不同文件有不同的队列" },
+    { line: 6, note: "realpath 解析符号链接：/app/link.ts 和 /app/real.ts 如果指向同一文件则共享队列" },
+    { line: 15, note: "当前队列不存在时，Promise.resolve() 作为空队列" },
+    { line: 24, note: "await currentQueue — 等待前面的同文件操作完成" },
+    { line: 28, note: "无论成功失败都释放锁，避免死锁" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/coding-agent/src/core/tools/file-mutation-queue.ts"
+/>
+
+效果：
+
+```
+LLM 请求 4 个 edit:
+  edit file-a.ts (1)  ──┐
+  edit file-b.ts (2)  ──┼── 1, 2, 3 并行执行
+  edit file-a.ts (3)  ──┘    ↑ 但 3 等待 1 完成（同文件串行）
+  edit file-c.ts (4)  ────── 4 也并行执行
+```
+
+---
+
+## 3.3 工具调用完整链路
+
+当 LLM 返回包含工具调用的消息后，Pi 的 agent-loop 开始执行一个精心编排的三阶段流水线。
+
+### 三阶段流水线
+
+<VideoEmbed
+  client:visible
+  title="V08 · Tool Call Flow"
+  description="工具调用的三阶段流水线动画 — 准备、执行、完成"
+  duration="~18s"
+  compositionId="V08_ToolCallFlow"
+/>
+
+整个流程分为三个阶段：
+
+**Phase 1：Prepare（顺序执行）**
+
+```
+对每个 toolCall 依次执行：
+  1. 查找工具 → 找不到则立即返回错误
+  2. validateToolArguments() → 验证参数
+  3. beforeToolCall 钩子 → 可以 block 执行
+  → 输出：PreparedToolCall（可执行） 或 ImmediateToolCallOutcome（立即结果）
+```
+
+**Phase 2：Execute（并发执行）**
+
+```
+所有 PreparedToolCall 同时启动执行：
+  1. tool.execute() 运行
+  2. onUpdate 回调流式发送进度
+  3. await Promise.all(updateEvents) 确保进度事件全部发出
+  → 输出：ExecutedToolCallOutcome（成功或错误）
+```
+
+**Phase 3：Finalize（源序处理）**
+
+```
+按 LLM 返回的原始顺序依次处理：
+  1. afterToolCall 钩子 → 可以修改结果
+  2. emitToolCallOutcome → 发出 tool_execution_end 事件
+  3. 构建 ToolResultMessage → 发出 message_start/end
+```
+
+### 核心代码：并行执行保序
+
+<SourceReader
+  client:visible
+  code={`async function executeToolCallsParallel(
+  currentContext: AgentContext,
+  assistantMessage: AssistantMessage,
+  toolCalls: AgentToolCall[],
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+): Promise<ToolResultMessage[]> {
+  const results: ToolResultMessage[] = [];
+  const runnableCalls: PreparedToolCall[] = [];
+
+  // Phase 1: 顺序 prepare
+  for (const toolCall of toolCalls) {
+    await emit({
+      type: "tool_execution_start",
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      args: toolCall.arguments,
+    });
+
+    const preparation = await prepareToolCall(
+      currentContext, assistantMessage, toolCall, config, signal
+    );
+    if (preparation.kind === "immediate") {
+      results.push(await emitToolCallOutcome(
+        toolCall, preparation.result, preparation.isError, emit
+      ));
+    } else {
+      runnableCalls.push(preparation);
+    }
+  }
+
+  // Phase 2: 并发 execute — 关键：.map() 启动所有 Promise
+  const runningCalls = runnableCalls.map((prepared) => ({
+    prepared,
+    execution: executePreparedToolCall(prepared, signal, emit),
+  }));
+
+  // Phase 3: 按源序 finalize — 关键：for...of 按顺序 await
+  for (const running of runningCalls) {
+    const executed = await running.execution;
+    results.push(
+      await finalizeExecutedToolCall(
+        currentContext, assistantMessage,
+        running.prepared, executed, config, signal, emit,
+      ),
+    );
+  }
+
+  return results;
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={390}
+  highlights={[
+    { line: 403, note: "Phase 1: prepare 必须顺序执行，因为 beforeToolCall 可能依赖前一个的结果" },
+    { line: 413, note: "immediate 结果直接入队 — 不需要等待执行" },
+    { line: 420, note: "Phase 2 关键：.map() 而不是 for 循环 — 所有工具同时开始执行" },
+    { line: 426, note: "Phase 3 关键：for...of 按原始顺序依次 await — 保证结果序保持 LLM 请求的顺序" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/agent-loop.ts#L390"
+/>
+
+**并行执行保序的关键在于两行代码的区别**：
+
+```typescript
+// Phase 2: .map() 启动所有 Promise（但不 await）
+const runningCalls = runnableCalls.map(p => ({
+  prepared: p,
+  execution: executePreparedToolCall(p, signal, emit),  // Promise 已经在跑了
+}));
+
+// Phase 3: for...of 按顺序 await 已经在跑的 Promise
+for (const running of runningCalls) {
+  const executed = await running.execution;  // 等待第 i 个完成
+  // ... finalize 第 i 个
+}
+```
+
+即使 toolCall[2] 比 toolCall[0] 先完成，结果数组中 toolCall[0] 的结果仍然在前面。这对 LLM 理解工具结果至关重要 —— 结果的顺序必须与请求的顺序一致。
+
+### Prepare 阶段详解
+
+<SourceReader
+  client:visible
+  code={`async function prepareToolCall(
+  currentContext: AgentContext,
+  assistantMessage: AssistantMessage,
+  toolCall: AgentToolCall,
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+  // 1. 查找工具
+  const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
+  if (!tool) {
+    return {
+      kind: "immediate",
+      result: createErrorToolResult(\`Tool \${toolCall.name} not found\`),
+      isError: true,
+    };
+  }
+
+  try {
+    // 2. 验证参数
+    const validatedArgs = validateToolArguments(tool, toolCall);
+
+    // 3. beforeToolCall 钩子
+    if (config.beforeToolCall) {
+      const beforeResult = await config.beforeToolCall(
+        { assistantMessage, toolCall, args: validatedArgs, context: currentContext },
+        signal,
+      );
+      if (beforeResult?.block) {
+        return {
+          kind: "immediate",
+          result: createErrorToolResult(
+            beforeResult.reason || "Tool execution was blocked"
+          ),
+          isError: true,
+        };
+      }
+    }
+    return { kind: "prepared", toolCall, tool, args: validatedArgs };
+  } catch (error) {
+    return {
+      kind: "immediate",
+      result: createErrorToolResult(
+        error instanceof Error ? error.message : String(error)
+      ),
+      isError: true,
+    };
+  }
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={458}
+  highlights={[
+    { line: 466, note: "工具查找：在当前上下文的 tools 数组中按 name 查找" },
+    { line: 477, note: "验证在 beforeToolCall 之前 — 钩子收到的是已验证的参数" },
+    { line: 481, note: "beforeToolCall 收到 validatedArgs，但不能修改它们" },
+    { line: 484, note: "block: true 阻止执行，reason 会作为错误消息发送给 LLM" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/agent-loop.ts#L458"
+/>
+
+注意流程的顺序：**先验证，再调用钩子**。这意味着 `beforeToolCall` 收到的 `args` 是经过 AJV 验证和类型强制转换后的合法参数。如果参数验证失败，`beforeToolCall` 根本不会被调用。
+
+### Execute 阶段：进度事件的处理
+
+<SourceReader
+  client:visible
+  code={`async function executePreparedToolCall(
+  prepared: PreparedToolCall,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+): Promise<ExecutedToolCallOutcome> {
+  const updateEvents: Promise<void>[] = [];
+
+  try {
+    const result = await prepared.tool.execute(
+      prepared.toolCall.id,
+      prepared.args as never,
+      signal,
+      (partialResult) => {
+        updateEvents.push(
+          Promise.resolve(
+            emit({
+              type: "tool_execution_update",
+              toolCallId: prepared.toolCall.id,
+              toolName: prepared.toolCall.name,
+              args: prepared.toolCall.arguments,
+              partialResult,
+            }),
+          ),
+        );
+      },
+    );
+    await Promise.all(updateEvents);  // 确保所有进度事件发出
+    return { result, isError: false };
+  } catch (error) {
+    await Promise.all(updateEvents);  // 即使失败也要等进度事件发完
+    return {
+      result: createErrorToolResult(
+        error instanceof Error ? error.message : String(error)
+      ),
+      isError: true,
+    };
+  }
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={509}
+  highlights={[
+    { line: 514, note: "updateEvents 收集所有进度事件的 Promise" },
+    { line: 521, note: "onUpdate 回调 — 工具内部调用它来报告进度" },
+    { line: 533, note: "成功时等待所有进度事件发出后再返回结果" },
+    { line: 535, note: "失败时也等待进度事件 — 已发送的 update 不可撤回" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/agent-loop.ts#L509"
+/>
+
+这里有一个重要的设计决策：**进度事件是 fire-and-forget 的**。即使工具最终失败了，之前发送的进度事件已经到达 UI。这就是 "update then fail" 的场景 —— 用户可能看到了 3 条进度更新，然后看到一个错误结果。
+
+---
+
+## 3.4 工具执行的边界情况
+
+理解正常流程后，真正的技术深度在边界情况的处理上。
+
+### Update Then Fail
+
+```
+工具执行过程：
+  onUpdate({ text: "编译中..." })       ← UI 收到了
+  onUpdate({ text: "编译 50% 完成" })    ← UI 收到了
+  onUpdate({ text: "编译 80% 完成" })    ← UI 收到了
+  throw new Error("编译失败: 语法错误")   ← 工具抛错
+
+结果：
+  3 个 tool_execution_update 事件已经发送（不可撤回）
+  1 个 tool_execution_end 事件，isError: true
+  LLM 收到的是错误消息，不是之前的进度更新
+```
+
+这不是 bug，而是有意的设计。进度事件是给 UI 的实时反馈，工具结果是给 LLM 的最终判断依据。两者独立。
+
+### afterToolCall 的字段级覆盖
+
+<SourceReader
+  client:visible
+  code={`export interface AfterToolCallResult {
+  content?: (TextContent | ImageContent)[];
+  details?: unknown;
+  isError?: boolean;
+}
+
+// finalizeExecutedToolCall 中的合并逻辑
+if (config.afterToolCall) {
+  const afterResult = await config.afterToolCall(
+    { assistantMessage, toolCall: prepared.toolCall,
+      args: prepared.args, result, isError, context: currentContext },
+    signal,
+  );
+  if (afterResult) {
+    result = {
+      content: afterResult.content ?? result.content,   // 有则替换，无则保留
+      details: afterResult.details ?? result.details,
+    };
+    isError = afterResult.isError ?? isError;            // 可独立翻转错误标志
+  }
+}`}
+  filename="packages/agent/src/types.ts + agent-loop.ts"
+  language="typescript"
+  highlights={[
+    { line: 1, note: "所有字段都是可选的 — 只覆盖你想改的" },
+    { line: 5, note: "isError 可以独立设置 — 把错误变成功，或者把成功变错误" },
+    { line: 15, note: "字段级替换，不是深度合并 — content 要么全替换，要么全保留" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/agent-loop.ts#L558"
+/>
+
+关键行为：
+
+- **`afterResult.content` 有值**：完全替换 `result.content`，不是合并
+- **`afterResult.content` 为 undefined**：保留原始 `result.content`
+- **`isError` 可以独立翻转**：返回 `{ isError: false }` 可以把一个错误结果变成成功，反之亦然
+
+实际用例：
+- 把 `bash` 工具的非零退出码从"错误"转为"正常"（某些命令退出码非零是预期的）
+- 在工具结果中注入额外的上下文信息给 LLM
+- 基于工具结果触发用户审批流程
+
+### beforeToolCall 的时序
+
+```
+LLM 请求调用工具
+  → validateToolArguments()    ← 参数验证（先执行）
+  → beforeToolCall()           ← 钩子（后执行，收到已验证的参数）
+  → tool.execute()             ← 执行
+```
+
+**beforeToolCall 不能修改参数**。它收到的 `args` 是只读的（虽然 TypeScript 接口没有用 `readonly` 标记，但修改它不会影响后续传给 `execute` 的参数，因为它们来自同一个 `validatedArgs` 引用）。
+
+beforeToolCall 唯一能做的事情是：**决定是否阻止执行**。返回 `{ block: true, reason: "..." }` 会阻止工具执行并将 reason 作为错误消息发送给 LLM。
+
+### ToolResult 事件与 Assistant 事件的区别
+
+```
+AssistantMessage 事件序列：
+  message_start → message_update → message_update → ... → message_end
+                   （流式更新，可能有很多次）
+
+ToolResultMessage 事件序列：
+  message_start → message_end
+  （没有 update 阶段，同步完成）
+```
+
+工具执行的进度更新通过 `tool_execution_update` 事件发送，而不是 `message_update`。这是因为 `ToolResultMessage` 是在工具执行完成后一次性构建的。
+
+### 顺序模式 vs 并行模式
+
+Pi 默认使用并行模式，但也支持顺序模式：
+
+<SourceReader
+  client:visible
+  code={`export type ToolExecutionMode = "sequential" | "parallel";
+
+async function executeToolCalls(
+  currentContext: AgentContext,
+  assistantMessage: AssistantMessage,
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+): Promise<ToolResultMessage[]> {
+  const toolCalls = assistantMessage.content.filter(
+    (c) => c.type === "toolCall"
+  );
+  if (config.toolExecution === "sequential") {
+    return executeToolCallsSequential(
+      currentContext, assistantMessage, toolCalls, config, signal, emit
+    );
+  }
+  return executeToolCallsParallel(
+    currentContext, assistantMessage, toolCalls, config, signal, emit
+  );
+}`}
+  filename="packages/agent/src/agent-loop.ts"
+  language="typescript"
+  startLine={336}
+  highlights={[
+    { line: 1, note: "两种模式：顺序和并行" },
+    { line: 12, note: "从 assistantMessage.content 中筛选出所有 toolCall 类型的 block" },
+    { line: 13, note: "顺序模式：每个工具完全执行完后才开始下一个" }
+  ]}
+  githubUrl="https://github.com/nicepkg/pi/blob/main/packages/agent/src/agent-loop.ts#L336"
+/>
+
+顺序模式的执行流程更简单 —— 每个工具走完 prepare → execute → finalize 的完整流程后，才开始下一个工具。但速度更慢，尤其是当多个工具互相独立时。
+
+---
+
+## 3.5 动手：实现工具系统
+
+现在到你动手的时候了。在 `demos/03-tool-system/` 目录中有 6 个渐进式练习：
+
+### 练习 01：Schema 验证
+
+```
+demos/03-tool-system/01-schema-validation.ts
+```
+
+用 TypeBox 定义工具参数 Schema，体验 `Static<T>` 类型推导和 AJV 验证：
+
+```typescript
+import { Type, type Static } from '@sinclair/typebox';
+import Ajv from 'ajv';
+
+// 定义 Schema
+const searchSchema = Type.Object({
+  query: Type.String({ description: "Search query" }),
+  maxResults: Type.Optional(Type.Number({ default: 10 })),
+  caseSensitive: Type.Optional(Type.Boolean({ default: false })),
+});
+
+// 自动推导 TypeScript 类型
+type SearchInput = Static<typeof searchSchema>;
+
+// AJV 验证（coerceTypes 把 "10" 变成 10）
+const ajv = new Ajv({ coerceTypes: true, strict: false, allErrors: true });
+const validate = ajv.compile(searchSchema);
+```
+
+### 练习 02：工具注册与发现
+
+```
+demos/03-tool-system/02-tool-registry.ts
+```
+
+实现一个简单的工具注册表，按名称查找工具：
+
+```typescript
+class ToolRegistry {
+  private tools = new Map<string, AgentTool>();
+
+  register(tool: AgentTool) { this.tools.set(tool.name, tool); }
+  find(name: string) { return this.tools.get(name); }
+  list() { return [...this.tools.values()]; }
+}
+```
+
+### 练习 03：并行 vs 顺序执行
+
+```
+demos/03-tool-system/03-parallel-exec.ts
+```
+
+实现两种执行模式，理解 `.map()` 启动 + `for...of await` 保序的技巧。
+
+### 练习 04：Before/After 钩子
+
+```
+demos/03-tool-system/04-hooks.ts
+```
+
+实现权限检查（beforeToolCall block）和结果审计（afterToolCall 记录）。
+
+### 练习 05：自定义工具
+
+```
+demos/03-tool-system/05-custom-tool.ts
+```
+
+实现一个自定义工具（如 HTTP 请求工具），体验完整的 AgentTool 接口。
+
+### 练习 06：Update Then Fail
+
+```
+demos/03-tool-system/06-update-then-fail.ts
+```
+
+模拟工具发送 3 个进度更新后抛出错误，观察事件序列。
+
+### Pi 的工具定义 vs 我们的简化版
+
+<CodeComparison
+  client:visible
+  left={{
+    label: "Pi 的 AgentTool",
+    language: "typescript",
+    code: `// Pi: 完整的工具定义
+interface AgentTool<TParams, TDetails> {
+  name: string;
+  label: string;         // UI 显示名
+  description: string;   // LLM 看的说明
+  parameters: TParams;   // TypeBox Schema
+
+  execute: (
+    toolCallId: string,
+    params: Static<TParams>,
+    signal?: AbortSignal,
+    onUpdate?: AgentToolUpdateCallback,
+  ) => Promise<AgentToolResult<TDetails>>;
+}
+
+// 返回值分离 content 和 details
+interface AgentToolResult<T> {
+  content: (TextContent | ImageContent)[];
+  details: T;  // UI-only metadata
+}`
+  }}
+  right={{
+    label: "简化版工具",
+    language: "typescript",
+    code: `// 简化：去掉 UI 相关的复杂度
+interface SimpleTool {
+  name: string;
+  description: string;
+  parameters: TSchema;
+
+  execute: (
+    params: Record<string, unknown>,
+  ) => Promise<string>;
+}
+
+// 返回值就是一个字符串
+// 没有 content/details 分离
+// 没有 signal（不支持取消）
+// 没有 onUpdate（不支持进度）
+// 没有 toolCallId（不需要关联）
+
+
+
+`
+  }}
+/>
+
+简化版足够理解核心概念，但 Pi 的设计考虑了真实生产环境的需求：取消支持、进度报告、UI 元数据分离。
+
+---
+
+## 3.6 本章小结
+
+### 核心要点
+
+1. **工具系统 = Schema 定义 + 验证 + 执行 + 钩子** —— 四个环节缺一不可，构成了 Agent 与外部世界交互的完整管道
+
+2. **并行执行保序是关键设计** —— `.map()` 启动所有 Promise，`for...of await` 按源序收集结果。这个模式在 Agent 系统中至关重要：LLM 必须按请求顺序看到结果
+
+3. **可插拔 Operations 接口使工具与底层解耦** —— 同一个 bash/edit 工具可以运行在本地、SSH、Docker、测试 Mock 等不同环境
+
+4. **content vs details 分离** —— 发送给 LLM 的信息（content）和展示给用户的信息（details）有不同的需求，强制分离避免信息过载
+
+5. **TypeBox + AJV 的选择** —— 不是"比 Zod 更好"，而是"直接生成 LLM 需要的 JSON Schema"，减少转换步骤和信息损失
+
+### 架构关系图
+
+```
+AgentLoopConfig
+  ├── tools: AgentTool[]           ← 注册的工具集合
+  ├── toolExecution: "parallel"    ← 执行模式
+  ├── beforeToolCall()             ← 准备阶段钩子
+  └── afterToolCall()              ← 完成阶段钩子
+
+工具调用流水线:
+  LLM 返回 toolCall[]
+    → [Phase 1] prepare: find → validate → beforeToolCall
+    → [Phase 2] execute: tool.execute() (并发)
+    → [Phase 3] finalize: afterToolCall → emit (按序)
+    → ToolResultMessage[] 送回 LLM
+```
+
+### 下一章预告
+
+下一章我们将深入 **流式与事件系统** —— 理解 Pi 如何通过 `EventStream` 把 LLM 的流式输出、工具执行进度、Agent 生命周期事件统一成一条事件流，以及这个事件流如何驱动 UI 更新。
