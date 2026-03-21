@@ -4,6 +4,162 @@ chapter: 0
 description: "10 分钟建立全局认知，知道学完能得到什么"
 ---
 
+import SourceReader from '../../components/tutorial/SourceReader';
+import VideoEmbed from '../../components/tutorial/VideoEmbed';
+
 # 全景导读
 
-> 占位内容，Part2 填充。
+用 10 分钟建立全局认知。读完这一章，你会知道：什么是 AI Coding Agent、为什么选 Pi 来学、Pi 的架构长什么样、以及接下来 8 章的学习路线。
+
+---
+
+## 什么是 AI Coding Agent
+
+先澄清一个常见误解：**Agent 不是聊天机器人。**
+
+ChatBot 的工作模式很简单——你输入一句话，它输出一段回复，结束。
+
+Agent 的工作模式完全不同：
+
+```
+ChatBot:  input → output
+Agent:    input → [思考 → 行动 → 观察]* → output
+```
+
+关键区别在于：Agent 能使用工具。它可以读写文件、执行终端命令、搜索代码库，并根据工具返回的结果继续推理。这个 think-act-observe 循环会自主运行多轮，直到任务完成。
+
+举个具体例子：你对 Agent 说"帮我修复这个 bug"，它不会直接给你一段代码让你自己粘贴。它会自己读代码、定位问题所在的文件和行号、编辑文件修复问题、运行测试确认通过、最后告诉你修好了。整个过程中你只下达了一个指令。
+
+<VideoEmbed client:visible title="Agent vs ChatBot" description="ChatBot 是单次问答，Agent 是带工具调用的自主循环" duration="8s" />
+
+这个循环就是本教程的核心。接下来的 8 章，我们会从零开始拆解它、理解它、最终自己实现它。
+
+---
+
+## 为什么选 Pi 作为学习对象
+
+市面上有不少 Agent 框架，为什么偏偏选 Pi？
+
+**足够小。** Pi 的核心代码只有约 1,900 行，分布在 5 个文件里。一下午就能读完全部源码，不存在"读了三天还没找到入口"的问题。
+
+**足够强。** 体量小不代表简陋。Pi 在 Terminal-Bench 2.0 基准测试中，搭配 Claude Opus 进入排行榜前列，和体量大几十倍的框架同台竞技。
+
+**足够透明。** 对比几个常见选择：
+- Claude Code：5-10 万行代码，闭源核心逻辑，学习门槛极高
+- LangChain：抽象层数太多，一个简单调用要穿过七八层封装
+- Vercel AI SDK：API 设计优雅，但刻意隐藏了核心循环的细节
+
+Pi 把 Agent 循环完整暴露在你面前，没有魔法，没有隐藏。
+
+**开源友好。** MIT 协议，社区活跃，代码风格清晰。
+
+最后，Pi 有一条核心哲学——"The One Rule"：
+
+> 你必须理解你的代码。如果你无法解释每一个边界情况，这段代码就不该存在。
+
+这恰好是本教程的目标：不是教你调 API，而是让你真正理解 Agent 内部发生了什么。
+
+---
+
+## Pi 的三层架构
+
+Pi 采用三层架构，从底向上依次是：
+
+**pi-ai** — LLM 统一抽象层。封装了 20+ 大模型 Provider 的 API（Anthropic、OpenAI、Google、Bedrock、Mistral 等），对上层提供统一的调用接口。不管底层用哪家模型，上层代码不需要改动。
+
+**pi-agent-core** — Agent 运行时。这是整个框架的核心，包含三部分：核心循环（Agent Loop）、工具系统（Tool System）和事件流（Event Stream）。总共约 1,900 行代码，是本教程的重点。
+
+**pi-coding-agent** — 具体应用层。基于 agent-core 构建的编程 Agent，提供 7 个内置工具（读文件、写文件、执行命令等）、扩展系统、会话管理和终端界面（TUI）。
+
+<VideoEmbed client:visible title="Pi 三层架构" description="pi-ai → pi-agent-core → pi-coding-agent，从底向上构建" duration="10s" />
+
+来看看 agent-core 的入口文件有多简洁：
+
+<SourceReader client:visible
+  filename="packages/agent/src/index.ts"
+  code={`export * from "./agent.js";
+export * from "./agent-loop.js";
+export * from "./proxy.js";
+export * from "./types.js";`}
+  highlights={[
+    { line: 1, note: "Agent 类 — 带状态管理的高层封装" },
+    { line: 2, note: "agentLoop — 核心循环，整个框架的心脏" },
+  ]}
+/>
+
+4 行导出，4 个模块，构成了一个完整的 Agent 运行时。这就是 Pi 的设计哲学——只保留必要的东西。
+
+---
+
+## 学习路线图
+
+本教程共 8 章，按依赖关系分为四个阶段：
+
+**第一阶段：基础** — 建立核心认知
+
+- Chapter 1：Agent 核心概念。理解 Tool Use 协议、消息流转、Agent 与 LLM 的本质区别
+- Chapter 2：核心循环。逐行拆解 `agentLoop`，理解 think-act-observe 循环的实现
+
+**第二阶段：机制** — 深入关键子系统
+
+- Chapter 3：工具系统。Tool 的定义、注册、调用、结果回传的完整链路
+- Chapter 4：流式处理。SSE 协议、Token 级流式输出、事件驱动架构
+
+**第三阶段：集成** — 打通模型层
+
+- Chapter 5：多模型统一。pi-ai 如何用一套接口适配 20+ Provider
+
+**第四阶段：构建与拓展** — 从理解到创造
+
+- Chapter 6：构建完整 Agent。整合前 5 章知识，从零构建一个可用的 Coding Agent
+- Chapter 7：框架对比。横向对比 Pi、LangChain、Vercel AI SDK 等框架的设计取舍
+- Chapter 8：进阶话题。多 Agent 协作、安全沙箱、性能优化等生产环境话题
+
+每一章的节奏一致：**读 Pi 源码 → 理解设计决策 → 自己动手实现 → 运行验证**。先看别人怎么做的，再理解为什么这么做，最后自己做一遍。
+
+---
+
+## 环境准备
+
+开始之前，确保准备好以下环境：
+
+**Node.js 20+**（推荐 22）。本教程的所有 Demo 代码基于 TypeScript 编写，使用 `tsx` 直接运行。
+
+```bash
+node --version  # 确认 >= 20
+```
+
+**API Key**。至少需要一个 LLM Provider 的 API Key。推荐使用 Anthropic Claude，教程中的示例默认使用它。
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+**Pi 源码**。教程已内置 Pi 的核心源码引用，无需额外克隆。如果你想本地浏览完整代码：
+
+```bash
+git clone https://github.com/AshkanAe/pi.git
+cd pi && npm install
+```
+
+**代码编辑器**。推荐 VS Code，安装 TypeScript 相关插件以获得类型提示和跳转支持。
+
+---
+
+## 约定
+
+本教程中，每章包含三种内容：
+
+- **源码阅读**：通过 SourceReader 组件展示 Pi 源码片段，带行号高亮和批注，点击高亮行查看解读
+- **动手实现**：提供可独立运行的 Demo 代码，在终端执行即可看到效果
+- **动画讲解**：通过 VideoEmbed 动画可视化抽象概念，帮助建立直觉
+
+Demo 代码的运行方式统一为：
+
+```bash
+npx tsx demos/01-hello-agent/src/01-raw-llm-call.ts
+```
+
+所有源码引用都标注了文件路径和行号。需要注意的是，行号可能随 Pi 版本更新而变化，以实际代码为准。
+
+准备好了？翻到下一章，我们从 Agent 的核心概念开始。
