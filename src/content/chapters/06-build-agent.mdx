@@ -5,7 +5,7 @@ description: "整合前 5 章所有概念，构建完整可用的 coding agent"
 ---
 import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
-import VideoEmbed from '../../components/tutorial/VideoEmbed';
+import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 # 构建完整 Agent
 
@@ -730,7 +730,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
   ]}
 />
 
-<VideoEmbed
+  <VideoEmbed
   client:visible
   title="V19 · Agent 可靠性机制"
   description="重试、溢出恢复、认证安全的完整流程动画"

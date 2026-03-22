@@ -5,7 +5,7 @@ description: "10 分钟建立全局认知，知道学完能得到什么"
 ---
 
 import SourceReader from '../../components/tutorial/SourceReader';
-import VideoEmbed from '../../components/tutorial/VideoEmbed';
+import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 # 全景导读
 
@@ -30,7 +30,7 @@ Agent:    input → [思考 → 行动 → 观察]* → output
 
 举个具体例子：你对 Agent 说"帮我修复这个 bug"，它不会直接给你一段代码让你自己粘贴。它会自己读代码、定位问题所在的文件和行号、编辑文件修复问题、运行测试确认通过、最后告诉你修好了。整个过程中你只下达了一个指令。
 
-<VideoEmbed client:visible compositionId="WhatIsAgent" title="Agent vs ChatBot" description="ChatBot 是单次问答，Agent 是带工具调用的自主循环" duration="8s" />
+<VideoEmbed compositionId="WhatIsAgent" title="Agent vs ChatBot" description="ChatBot 是单次问答，Agent 是带工具调用的自主循环" duration="8s" />
 
 这个循环就是本教程的核心。接下来的 8 章，我们会从零开始拆解它、理解它、最终自己实现它。
 
@@ -71,7 +71,7 @@ Pi 采用三层架构，从底向上依次是：
 
 **pi-coding-agent** — 具体应用层。基于 agent-core 构建的编程 Agent，提供 7 个内置工具（读文件、写文件、执行命令等）、扩展系统、会话管理和终端界面（TUI）。
 
-<VideoEmbed client:visible compositionId="PiArchOverview" title="Pi 三层架构" description="pi-ai → pi-agent-core → pi-coding-agent，从底向上构建" duration="10s" />
+<VideoEmbed compositionId="PiArchOverview" title="Pi 三层架构" description="pi-ai → pi-agent-core → pi-coding-agent，从底向上构建" duration="10s" />
 
 来看看 agent-core 的入口文件有多简洁：
 

@@ -1,0 +1,116 @@
+---
+interface Props {
+  title: string;
+  description?: string;
+  duration?: string;
+  compositionId?: string;
+  src?: string;
+}
+
+const { title, description, duration, compositionId, src } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const videoSrc = src || (compositionId ? `${base}/videos/${compositionId}.mp4` : null);
+---
+
+{videoSrc ? (
+  <div class="video-container">
+    <div class="video-titlebar">
+      <span class="video-title">{title}</span>
+      {duration && <span class="video-duration">{duration}</span>}
+    </div>
+    <video
+      src={videoSrc}
+      autoplay
+      muted
+      loop
+      playsinline
+      preload="auto"
+      controls
+    />
+  </div>
+) : (
+  <div class="video-placeholder">
+    <div class="video-placeholder-icon">&#9654;</div>
+    <div class="video-placeholder-title">{title}</div>
+    <div class="video-placeholder-desc">
+      {description || "视频未生成 — 运行 npm run render-videos"}
+    </div>
+  </div>
+)}
+
+<style>
+  .video-container {
+    background: var(--bg-card, #1e1e2e);
+    border: 1px solid var(--border, #2a2a3a);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1.5rem 0;
+  }
+
+  .video-titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid var(--border, #2a2a3a);
+  }
+
+  .video-title {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 13px;
+    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  }
+
+  .video-duration {
+    color: rgba(255, 255, 255, 0.3);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  video {
+    width: 100%;
+    display: block;
+    background: var(--bg-primary, #0a0a1a);
+  }
+
+  .video-placeholder {
+    background: var(--bg-card, #1e1e2e);
+    border: 1px solid var(--border, #2a2a3a);
+    border-radius: 8px;
+    padding: 48px 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    margin: 1.5rem 0;
+  }
+
+  .video-placeholder-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: 2px solid var(--accent, #D97757);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(217, 119, 87, 0.1);
+    color: var(--accent, #D97757);
+    font-size: 22px;
+    padding-left: 3px;
+  }
+
+  .video-placeholder-title {
+    color: var(--text-primary, #e0e0e0);
+    font-size: 16px;
+    font-weight: 600;
+    text-align: center;
+  }
+
+  .video-placeholder-desc {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 13px;
+    text-align: center;
+  }
+</style>

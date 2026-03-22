@@ -6,7 +6,7 @@ description: "逐行理解 Pi 的 Agent Loop，理解双层循环和状态机，
 
 import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
-import VideoEmbed from '../../components/tutorial/VideoEmbed';
+import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 # 核心循环
 
@@ -242,7 +242,7 @@ import VideoEmbed from '../../components/tutorial/VideoEmbed';
     发射 agent_end
 ```
 
-<VideoEmbed
+  <VideoEmbed
   client:visible
   title="Agent Loop 双层循环动画"
   description="可视化 Inner Loop（tool calls + steering）和 Outer Loop（follow-up）的运行流程"

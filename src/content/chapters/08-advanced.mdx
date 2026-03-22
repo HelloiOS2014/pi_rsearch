@@ -4,7 +4,7 @@ chapter: 8
 description: "扩展系统、TUI/Web UI 架构、Skills、产品化考量"
 ---
 import SourceReader from '../../components/tutorial/SourceReader';
-import VideoEmbed from '../../components/tutorial/VideoEmbed';
+import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 # 进阶扩展
 
@@ -252,7 +252,7 @@ pi.on("tool_call", (event, ctx) => {
 
 用户使用：`pi --audit-mode --audit-output=/tmp/audit.log`
 
-<VideoEmbed
+  <VideoEmbed
   client:visible
   compositionId="ExtensionArch"
   title="V26: 扩展系统全景"
