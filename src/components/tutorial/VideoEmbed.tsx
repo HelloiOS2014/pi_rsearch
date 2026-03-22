@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 
 interface VideoEmbedProps {
   title: string;
@@ -6,6 +6,13 @@ interface VideoEmbedProps {
   duration?: string;
   compositionId?: string;
   src?: string;
+}
+
+function getBaseUrl(): string {
+  if (typeof document === "undefined") return "";
+  const meta = document.querySelector('meta[name="base-url"]');
+  const base = meta?.getAttribute("content") || "/";
+  return base.replace(/\/$/, "");
 }
 
 export const VideoEmbed: React.FC<VideoEmbedProps> = ({
@@ -17,21 +24,62 @@ export const VideoEmbed: React.FC<VideoEmbedProps> = ({
 }) => {
   const [hasError, setHasError] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [needsManualPlay, setNeedsManualPlay] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  // Determine video source: explicit src > compositionId-based path
-  const videoSrc = src || (compositionId ? `/videos/${compositionId}.mp4` : null);
+  // Build video source with base URL prefix
+  const base = typeof document !== "undefined" ? getBaseUrl() : "";
+  const videoSrc = src || (compositionId ? `${base}/videos/${compositionId}.mp4` : null);
 
-  // If we have a video source and no error, show the real player
+  // Fix React muted attribute bug + IntersectionObserver for mobile autoplay
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    // Force muted attribute (React bug workaround)
+    video.muted = true;
+
+    // IntersectionObserver: play when visible, pause when not
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            video.play().catch(() => {
+              // Autoplay blocked — show controls for manual play
+              setNeedsManualPlay(true);
+            });
+          } else {
+            video.pause();
+          }
+        });
+      },
+      { threshold: 0.3 }
+    );
+
+    observer.observe(video);
+    return () => observer.disconnect();
+  }, [videoSrc]);
+
+  const handleManualPlay = useCallback(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.play();
+      setNeedsManualPlay(false);
+    }
+  }, []);
+
   if (videoSrc && !hasError) {
     return (
       <div
+        ref={containerRef}
         style={{
           backgroundColor: "#1e1e2e",
           border: "1px solid #2a2a3a",
           borderRadius: 8,
           overflow: "hidden",
           margin: "1.5rem 0",
+          position: "relative",
         }}
       >
         {/* Title bar */}
@@ -67,7 +115,7 @@ export const VideoEmbed: React.FC<VideoEmbedProps> = ({
           )}
         </div>
 
-        {/* Video — autoplay muted loop, behaves like an animated diagram */}
+        {/* Video */}
         <video
           ref={videoRef}
           src={videoSrc}
@@ -76,6 +124,7 @@ export const VideoEmbed: React.FC<VideoEmbedProps> = ({
           loop
           playsInline
           preload="auto"
+          controls={needsManualPlay}
           onError={() => setHasError(true)}
           onLoadedMetadata={() => setIsLoaded(true)}
           style={{
@@ -86,11 +135,44 @@ export const VideoEmbed: React.FC<VideoEmbedProps> = ({
             transition: "opacity 0.3s ease",
           }}
         />
+
+        {/* Manual play overlay (shown when autoplay is blocked) */}
+        {needsManualPlay && !isLoaded && (
+          <div
+            onClick={handleManualPlay}
+            style={{
+              position: "absolute",
+              inset: 0,
+              top: 40,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              backgroundColor: "rgba(0,0,0,0.4)",
+            }}
+          >
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: "50%",
+                backgroundColor: "rgba(217,119,87,0.9)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <span style={{ color: "#fff", fontSize: 24, marginLeft: 3 }}>
+                &#9654;
+              </span>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
-  // Fallback: placeholder UI (no video source or video failed to load)
+  // Fallback placeholder
   return (
     <div
       style={{
