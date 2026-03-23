@@ -91,7 +91,7 @@ export default function SourceReader({
                         color: isHl ? 'var(--accent, #D97757)' : 'var(--text-muted)', opacity: isHl ? 0.9 : 0.4,
                         fontSize: '0.75rem', userSelect: 'none',
                       }}>{num}</span>
-                      <span>{hl(line)}</span>
+                      <span style={{ whiteSpace: 'pre' }}>{hl(line)}</span>
                     </div>
                     {isActive && note && (
                       <div style={{

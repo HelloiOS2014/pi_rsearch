@@ -53,7 +53,7 @@ function Panel({ config, accent, tag }: { config: CodePanelConfig; accent: strin
             {lines.map((line, i) => (
               <div key={i} style={{ display: 'flex', padding: '0 14px 0 0' }}>
                 <span style={{ display: 'inline-block', width: 36, textAlign: 'right', paddingRight: 10, flexShrink: 0, color: 'var(--text-muted)', opacity: 0.35, fontSize: '0.75rem', userSelect: 'none' }}>{i + 1}</span>
-                <span>{hl(line)}</span>
+                <span style={{ whiteSpace: 'pre' }}>{hl(line)}</span>
               </div>
             ))}
           </code>
