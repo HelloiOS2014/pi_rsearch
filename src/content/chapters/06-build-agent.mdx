@@ -7,23 +7,7 @@ import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
 import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
-# 构建完整 Agent
-
-本章目标：整合前 5 章学到的所有概念 —— Core Loop、工具系统、流式处理、多模型支持 —— 构建一个完整可用的 coding agent。这是整个教程的 capstone 章节。
-
-前 5 章我们分别攻克了一个个独立模块。但一个生产级 Agent 不仅仅是"把模块拼起来"，还需要 System Prompt 设计、会话持久化、上下文压缩、自动重试、配置系统、运行模式切换等大量"胶水"工程。Pi 在这些方面的设计非常值得学习。
-
----
-
-## 6.1 System Prompt 设计
-
-### 动态 Prompt 构建
-
-大多数 Agent 的 system prompt 是一个硬编码的字符串。Pi 不同 —— 它的 prompt 是**动态组装**的，根据当前启用的工具、加载的 Skills、项目上下文文件自适应调整。
-
-<SourceReader
-  client:visible
-  code={`export interface BuildSystemPromptOptions {
+export const codeBuildSystemPromptOptions = `export interface BuildSystemPromptOptions {
   /** Custom system prompt (replaces default). */
   customPrompt?: string;
   /** Tools to include in prompt. Default: [read, bash, edit, write] */
@@ -40,7 +24,691 @@ import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
   contextFiles?: Array<{ path: string; content: string }>;
   /** Pre-loaded skills. */
   skills?: Skill[];
-}`}
+}`;
+
+export const codeAdaptiveGuidelines = `// Build guidelines based on which tools are actually available
+const guidelinesList: string[] = [];
+const guidelinesSet = new Set<string>();
+const addGuideline = (guideline: string): void => {
+  if (guidelinesSet.has(guideline)) return;
+  guidelinesSet.add(guideline);
+  guidelinesList.push(guideline);
+};
+
+const hasBash = tools.includes("bash");
+const hasEdit = tools.includes("edit");
+const hasGrep = tools.includes("grep");
+
+// File exploration guidelines
+if (hasBash && !hasGrep && !hasFind && !hasLs) {
+  addGuideline("Use bash for file operations like ls, rg, find");
+} else if (hasBash && (hasGrep || hasFind || hasLs)) {
+  addGuideline("Prefer grep/find/ls tools over bash for file exploration");
+}
+
+// Read before edit guideline
+if (hasRead && hasEdit) {
+  addGuideline("Use read to examine files before editing");
+}`;
+
+export const codeToolGuidelines = `const TOOL_GUIDELINES: Record<string, string> = {
+  read_file:
+    "- Always read a file before attempting to modify it.\\n" +
+    "- Use offset/limit for large files instead of reading everything.",
+  write_file:
+    "- Prefer editing existing files over creating new ones.\\n" +
+    "- Always use absolute file paths.",
+  bash:
+    "- Prefer the search tool over \`grep\` or \`find\` commands.\\n" +
+    "- Use bash for running tests, installing packages, or git operations.",
+  search:
+    "- Use search to find code patterns, function definitions, and references.",
+};
+
+export function buildSystemPrompt(options: PromptOptions): string {
+  const { tools, workingDirectory = process.cwd() } = options;
+  const date = new Date().toISOString().split("T")[0];
+
+  let prompt = \`You are a helpful coding assistant...
+
+Environment:
+- Date: \${date}
+- Working directory: \${workingDirectory}
+\`;
+
+  // Add tool-specific guidelines
+  const relevantGuidelines = tools
+    .map((t) => TOOL_GUIDELINES[t])
+    .filter(Boolean);
+
+  if (relevantGuidelines.length > 0) {
+    prompt += \`\\nTool usage:\\n\${relevantGuidelines.join("\\n")}\\n\`;
+  }
+
+  return prompt;
+}`;
+
+export const codeSessionEntryBase = `export interface SessionEntryBase {
+  type: string;
+  id: string;
+  parentId: string | null;
+  timestamp: string;
+}
+
+// 9 种条目类型
+export type SessionEntry =
+  | SessionMessageEntry       // LLM 消息 (user/assistant/toolResult)
+  | ThinkingLevelChangeEntry  // 切换 thinking level
+  | ModelChangeEntry          // 切换模型
+  | CompactionEntry           // 压缩摘要
+  | BranchSummaryEntry        // 分支摘要
+  | CustomEntry               // 扩展自定义数据 (不参与 LLM 上下文)
+  | CustomMessageEntry        // 扩展注入的上下文消息 (参与 LLM 上下文)
+  | LabelEntry                // 用户书签
+  | SessionInfoEntry          // 会话元数据 (显示名等)`;
+
+export const codeSessionMigration = `export const CURRENT_SESSION_VERSION = 3;
+
+/** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
+function migrateV1ToV2(entries: FileEntry[]): void {
+  const ids = new Set<string>();
+  let prevId: string | null = null;
+
+  for (const entry of entries) {
+    if (entry.type === "session") {
+      entry.version = 2;
+      continue;
+    }
+    entry.id = generateId(ids);
+    entry.parentId = prevId;
+    prevId = entry.id;
+  }
+}
+
+/** Migrate v2 → v3: rename hookMessage role to custom. */
+function migrateV2ToV3(entries: FileEntry[]): void {
+  for (const entry of entries) {
+    if (entry.type === "session") { entry.version = 3; continue; }
+    if (entry.type === "message") {
+      const msgEntry = entry as SessionMessageEntry;
+      if ((msgEntry.message as any).role === "hookMessage") {
+        (msgEntry.message as any).role = "custom";
+      }
+    }
+  }
+}
+
+/** Run all necessary migrations to bring entries to current version. */
+function migrateToCurrentVersion(entries: FileEntry[]): boolean {
+  const header = entries.find(e => e.type === "session") as SessionHeader;
+  const version = header?.version ?? 1;
+  if (version >= CURRENT_SESSION_VERSION) return false;
+
+  if (version < 2) migrateV1ToV2(entries);
+  if (version < 3) migrateV2ToV3(entries);
+  return true;
+}`;
+
+export const codeBuildSessionContext = `/**
+ * Build the session context from entries using tree traversal.
+ * If leafId is provided, walks from that entry to root.
+ * Handles compaction and branch summaries along the path.
+ */
+export function buildSessionContext(
+  entries: SessionEntry[],
+  leafId?: string | null,
+  byId?: Map<string, SessionEntry>,
+): SessionContext {
+  // Build uuid index if not available
+  if (!byId) {
+    byId = new Map<string, SessionEntry>();
+    for (const entry of entries) {
+      byId.set(entry.id, entry);
+    }
+  }
+  // ...walk from leaf to root, collect messages along the path
+}`;
+
+export const codeDemoSession = `export class Session {
+  private filePath: string;
+  private messages: Message[] = [];
+
+  /** Append a message to the session. */
+  async append(message: Message): Promise<void> {
+    this.messages.push(message);
+    const line = JSON.stringify(message) + "\\n";
+    await appendFile(this.filePath, line, "utf-8");
+  }
+
+  /** Load messages from session file. */
+  async load(): Promise<Message[]> {
+    const content = await readFile(this.filePath, "utf-8");
+    const lines = content.trim().split("\\n").filter(Boolean);
+    this.messages = lines.map(l => JSON.parse(l));
+    return this.messages;
+  }
+}`;
+
+export const codePiSessionManager = `// Pi 的 SessionManager 支持:
+// - 树结构 (id/parentId)
+// - 9 种条目类型
+// - 版本迁移 (v1→v2→v3)
+// - Fork/Branch 操作
+// - 从任意叶子重建线性上下文
+// - HTML/JSONL 导出
+
+export interface SessionEntryBase {
+  type: string;
+  id: string;         // 8-char hex
+  parentId: string | null;
+  timestamp: string;
+}
+
+// buildSessionContext:
+// 从叶子节点 → 根节点回溯收集消息
+// 遇到 CompactionEntry → 注入摘要
+// 遇到 BranchSummary → 注入分支摘要
+// 结果: 线性的 AgentMessage[] 给 LLM`;
+
+export const codeEstimateTokens = `/**
+ * Estimate token count for a message using chars/4 heuristic.
+ * This is conservative (overestimates tokens).
+ */
+export function estimateTokens(message: AgentMessage): number {
+  let chars = 0;
+
+  switch (message.role) {
+    case "user": {
+      const content = message.content;
+      if (typeof content === "string") {
+        chars = content.length;
+      } else if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === "text" && block.text) {
+            chars += block.text.length;
+          }
+        }
+      }
+      return Math.ceil(chars / 4);
+    }
+    case "assistant": {
+      for (const block of assistant.content) {
+        if (block.type === "text") chars += block.text.length;
+        else if (block.type === "thinking") chars += block.thinking.length;
+        else if (block.type === "toolCall")
+          chars += block.name.length + JSON.stringify(block.arguments).length;
+      }
+      return Math.ceil(chars / 4);
+    }
+    case "toolResult": {
+      // ...similar logic
+      // Images estimated as 4800 chars (≈1200 tokens)
+      return Math.ceil(chars / 4);
+    }
+  }
+  return 0;
+}`;
+
+export const codeFindValidCutPoints = `/**
+ * Find valid cut points: indices of user, assistant, custom, or
+ * bashExecution messages.
+ * Never cut at tool results (they must follow their tool call).
+ */
+function findValidCutPoints(
+  entries: SessionEntry[],
+  startIndex: number,
+  endIndex: number,
+): number[] {
+  const cutPoints: number[] = [];
+  for (let i = startIndex; i < endIndex; i++) {
+    const entry = entries[i];
+    switch (entry.type) {
+      case "message": {
+        const role = entry.message.role;
+        switch (role) {
+          case "user":
+          case "assistant":
+          case "bashExecution":
+          case "custom":
+          case "branchSummary":
+          case "compactionSummary":
+            cutPoints.push(i);
+            break;
+          case "toolResult":
+            break;  // NEVER cut here!
+        }
+        break;
+      }
+    }
+    // branch_summary and custom_message are user-role, valid cut points
+    if (entry.type === "branch_summary" || entry.type === "custom_message") {
+      cutPoints.push(i);
+    }
+  }
+  return cutPoints;
+}`;
+
+export const codeShouldCompact = `/**
+ * Check if compaction should trigger based on context usage.
+ */
+export function shouldCompact(
+  contextTokens: number,
+  contextWindow: number,
+  settings: CompactionSettings,
+): boolean {
+  if (!settings.enabled) return false;
+  return contextTokens > contextWindow - settings.reserveTokens;
+}
+
+export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
+  enabled: true,
+  reserveTokens: 16384,   // 16K reserved for prompt + LLM response
+  keepRecentTokens: 20000, // Keep ~20K tokens of recent conversation
+};`;
+
+export const codeSummarizationPrompt = `const SUMMARIZATION_PROMPT = \`Create a structured context checkpoint summary
+that another LLM will use to continue the work.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish?]
+
+## Constraints & Preferences
+- [Any constraints or requirements mentioned by user]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+### In Progress
+- [ ] [Current work]
+### Blocked
+- [Issues preventing progress]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Data, examples, or references needed to continue]
+
+Keep each section concise. Preserve exact file paths, function names,
+and error messages.\`;`;
+
+export const codeIsRetryableError = `/**
+ * Check if an error is retryable (overloaded, rate limit, server errors).
+ * Context overflow errors are NOT retryable (handled by compaction instead).
+ */
+private _isRetryableError(message: AssistantMessage): boolean {
+  if (message.stopReason !== "error" || !message.errorMessage) return false;
+
+  // Context overflow is handled by compaction, not retry
+  const contextWindow = this.model?.contextWindow ?? 0;
+  if (isContextOverflow(message, contextWindow)) return false;
+
+  const err = message.errorMessage;
+  return /overloaded|rate.?limit|too many requests|429|500|502|503|504
+    |service.?unavailable|connection.?error|fetch failed|timed? out/i.test(err);
+}`;
+
+export const codeWithRetry = `export async function withRetry<T>(
+  fn: () => Promise<T>,
+  options?: RetryOptions,
+): Promise<T> {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Don't retry on final attempt or non-retryable errors
+      if (attempt === opts.maxRetries || !isRetryable(error)) {
+        throw lastError;
+      }
+
+      // Exponential backoff + jitter
+      const exponentialDelay = opts.baseDelayMs * Math.pow(2, attempt);
+      const jitter = Math.random() * opts.baseDelayMs;
+      const delay = Math.min(exponentialDelay + jitter, opts.maxDelayMs);
+
+      opts.onRetry?.(lastError, attempt + 1, delay);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError ?? new Error("Retry failed");
+}`;
+
+export const codeAuthStorage = `/**
+ * Credential storage for API keys and OAuth tokens.
+ * Uses file locking to prevent race conditions when multiple pi
+ * instances try to refresh tokens simultaneously.
+ */
+export class FileAuthStorageBackend implements AuthStorageBackend {
+  constructor(
+    private authPath: string = join(getAgentDir(), "auth.json")
+  ) {}
+
+  private ensureFileExists(): void {
+    if (!existsSync(this.authPath)) {
+      writeFileSync(this.authPath, "{}", "utf-8");
+      chmodSync(this.authPath, 0o600); // Owner read/write only
+    }
+  }
+  // withLock<T>(fn): T — uses proper-lockfile for atomic read-modify-write
+}`;
+
+export const codeSettingsInterface = `export interface Settings {
+  defaultProvider?: string;
+  defaultModel?: string;
+  defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  transport?: TransportSetting;            // "sse" | "http"
+  steeringMode?: "all" | "one-at-a-time";
+  followUpMode?: "all" | "one-at-a-time";
+  theme?: string;
+  compaction?: CompactionSettings;
+  branchSummary?: BranchSummarySettings;
+  retry?: RetrySettings;
+  hideThinkingBlock?: boolean;
+  shellPath?: string;
+  quietStartup?: boolean;
+  packages?: PackageSource[];
+  extensions?: string[];
+  skills?: string[];
+  prompts?: string[];
+  themes?: string[];
+  enableSkillCommands?: boolean;
+  terminal?: TerminalSettings;
+  images?: ImageSettings;
+  enabledModels?: string[];
+  thinkingBudgets?: ThinkingBudgetsSettings;
+  markdown?: MarkdownSettings;
+  // ...50+ fields total
+}`;
+
+export const codeDeepMergeSettings = `/** Deep merge settings: project/overrides take precedence */
+function deepMergeSettings(base: Settings, overrides: Settings): Settings {
+  const result: Settings = { ...base };
+
+  for (const key of Object.keys(overrides) as (keyof Settings)[]) {
+    const overrideValue = overrides[key];
+    const baseValue = base[key];
+
+    if (overrideValue === undefined) continue;
+
+    // For nested objects, merge recursively
+    if (
+      typeof overrideValue === "object" && overrideValue !== null &&
+      !Array.isArray(overrideValue) &&
+      typeof baseValue === "object" && baseValue !== null &&
+      !Array.isArray(baseValue)
+    ) {
+      (result as any)[key] = { ...baseValue, ...overrideValue };
+    } else {
+      // For primitives and arrays, override value wins
+      (result as any)[key] = overrideValue;
+    }
+  }
+  return result;
+}`;
+
+export const codeAgentConfig = `export interface AgentConfig {
+  model: string;
+  provider: string;
+  apiKey: string;
+  maxTokens: number;
+  thinkingLevel: "none" | "low" | "medium" | "high";
+}
+
+const DEFAULTS: AgentConfig = {
+  model: "claude-sonnet-4-20250514",
+  provider: "anthropic",
+  apiKey: "",
+  maxTokens: 8192,
+  thinkingLevel: "none",
+};
+
+/** Resolve config with three-level merge: defaults → user → env */
+export async function resolveConfig(
+  overrides?: Partial<AgentConfig>,
+): Promise<AgentConfig> {
+  const userConfig = await loadUserConfig();  // ~/.pi-tutorial/config.json
+  const envConfig = loadEnvConfig();           // PI_MODEL, ANTHROPIC_API_KEY, etc.
+
+  return {
+    ...DEFAULTS,
+    ...userConfig,
+    ...envConfig,
+    ...overrides,
+  };
+}`;
+
+export const codeAgentConstructor = `export class Agent {
+  private client: Anthropic;
+  private config: AgentConfig;
+  private session: Session;
+  private systemPrompt: string;
+  private onEvent: EventHandler;
+  private abortController: AbortController | null = null;
+
+  constructor(config: AgentConfig, options?: {
+    session?: Session;
+    onEvent?: EventHandler;
+  }) {
+    this.config = config;
+    this.client = new Anthropic({ apiKey: config.apiKey });
+    this.session = options?.session ?? new Session();
+    this.onEvent = options?.onEvent ?? (() => {});
+    this.systemPrompt = buildSystemPrompt({
+      tools: ALL_TOOLS.map(t => t.name),
+    });
+  }`;
+
+export const codeAgentPrompt = `async prompt(userMessage: string): Promise<string> {
+  this.abortController = new AbortController();
+  const messages = this.session.getMessages();
+  messages.push({ role: "user", content: userMessage });
+  await this.session.append({ role: "user", content: userMessage });
+
+  this.emit({ type: "agent_start", model: this.config.model });
+
+  let turnNumber = 0;
+  const MAX_TURNS = 20;
+
+  while (turnNumber < MAX_TURNS) {
+    if (this.abortController.signal.aborted) break;
+    turnNumber++;
+    this.emit({ type: "turn_start", turnNumber });
+
+    // Call the API with retry (Ch.6.4)
+    const response = await withRetry(
+      () => this.client.messages.create({
+        model: this.config.model,
+        max_tokens: this.config.maxTokens,
+        system: this.systemPrompt,
+        tools: ALL_TOOLS as Anthropic.Messages.Tool[],
+        messages,
+      }),
+      { maxRetries: 3, onRetry: (err, attempt, delay) => {
+        this.emit({ type: "error", error: new Error(
+          \`Retry \${attempt} in \${Math.round(delay)}ms: \${err.message}\`
+        )});
+      }},
+    );
+
+    // Process response content blocks
+    let fullText = "";
+    const toolUseBlocks: Anthropic.Messages.ToolUseBlock[] = [];
+
+    for (const block of response.content) {
+      if (block.type === "text") {
+        fullText += block.text;
+        this.emit({ type: "text_delta", text: block.text });
+      } else if (block.type === "tool_use") {
+        toolUseBlocks.push(block);
+      }
+    }
+
+    // Add assistant message to conversation
+    messages.push({ role: "assistant", content: response.content });
+    await this.session.append({ role: "assistant", content: response.content });
+
+    // If no tool calls, we're done
+    if (toolUseBlocks.length === 0) {
+      this.emit({ type: "agent_end", totalTurns: turnNumber });
+      return fullText;
+    }
+
+    // Execute tool calls (Ch.3)
+    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+    for (const toolBlock of toolUseBlocks) {
+      if (this.abortController.signal.aborted) break;
+      this.emit({ type: "tool_start", name: toolBlock.name, id: toolBlock.id });
+
+      const executor = TOOL_EXECUTORS[toolBlock.name];
+      let result: string;
+      try {
+        result = executor
+          ? await executor(toolBlock.input as Record<string, unknown>)
+          : \`Unknown tool: \${toolBlock.name}\`;
+      } catch (err) {
+        result = \`Error: \${err instanceof Error ? err.message : String(err)}\`;
+      }
+
+      this.emit({ type: "tool_end", name: toolBlock.name, result });
+      toolResults.push({
+        type: "tool_result", tool_use_id: toolBlock.id, content: result,
+      });
+    }
+
+    // Add tool results to conversation
+    messages.push({ role: "user", content: toolResults });
+    await this.session.append({ role: "user", content: toolResults });
+  }
+
+  this.emit({ type: "agent_end", totalTurns: turnNumber });
+  return "(max turns reached)";
+}`;
+
+export const codeDemoAgentLoop = `// ~120 行，实现完整 agentic loop:
+// 1. 添加 user message → session
+// 2. while (turnNumber < MAX_TURNS)
+//    a. withRetry → client.messages.create()
+//    b. 处理 text blocks → emit events
+//    c. 处理 tool_use blocks → execute tools
+//    d. tool results → session
+//    e. 无 tool calls → return
+// 3. emit agent_end
+
+// 缺少的特性:
+// - Streaming (使用 create 而非 stream)
+// - Steering/Follow-up 消息队列
+// - 自动 compaction
+// - 溢出恢复
+// - 扩展事件系统`;
+
+export const codePiAgentSession = `// AgentSession 在 Agent (core loop) 之上增加:
+class AgentSession {
+  // 事件系统
+  private _eventListeners: AgentSessionEventListener[];
+  // 消息队列
+  private _steeringMessages: string[];
+  private _followUpMessages: string[];
+  // 压缩状态
+  private _overflowRecoveryAttempted = false;
+  // 重试状态
+  private _retryAttempt = 0;
+  // 扩展系统
+  private _extensionRunner: ExtensionRunner;
+
+  // 核心方法: prompt → agent.run →
+  //   _processAgentEvent → 持久化 + 重试 + 压缩
+  // fork → 创建新分支
+  // compact → 手动/自动压缩
+  // cycleModel → 切换模型
+}`;
+
+export const codeMainRepl = `async function main() {
+  const flags = parseArgs();
+  const mock = await isMockMode();
+
+  // Resolve config (三级合并: defaults → user → env)
+  const config = await resolveConfig({
+    model: flags.model as string | undefined,
+    apiKey: mock ? "mock" : undefined,
+  });
+
+  // Session setup
+  const session = new Session();
+  if (flags.continue) {
+    const loaded = await session.load();
+    if (loaded.length > 0) {
+      console.log(\`Resumed session with \${loaded.length} messages.\`);
+    }
+  }
+
+  console.log("=".repeat(50));
+  console.log("  My Agent - Pi Tutorial Capstone");
+  console.log("=".repeat(50));
+  console.log(\`Model: \${config.model}\`);
+  console.log(\`Mode:  \${mock ? "mock (no API key)" : "live"}\`);
+
+  // Interactive REPL
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+  const promptUser = () => {
+    rl.question("> ", async (input) => {
+      const trimmed = input.trim();
+      if (!trimmed) { promptUser(); return; }
+
+      // Handle slash commands
+      if (trimmed.startsWith("/")) {
+        await handleSlashCommand(trimmed, session);
+        promptUser();
+        return;
+      }
+
+      // Real agent call
+      const agent = new Agent(config, {
+        session,
+        onEvent: createEventHandler(),
+      });
+
+      try {
+        await agent.prompt(trimmed);
+      } catch (err) {
+        console.error(\`[Error] \${err instanceof Error ? err.message : err}\`);
+      }
+
+      promptUser();
+    });
+  };
+
+  promptUser();
+}`;
+
+
+# 构建完整 Agent
+
+本章目标：整合前 5 章学到的所有概念 —— Core Loop、工具系统、流式处理、多模型支持 —— 构建一个完整可用的 coding agent。这是整个教程的 capstone 章节。
+
+前 5 章我们分别攻克了一个个独立模块。但一个生产级 Agent 不仅仅是"把模块拼起来"，还需要 System Prompt 设计、会话持久化、上下文压缩、自动重试、配置系统、运行模式切换等大量"胶水"工程。Pi 在这些方面的设计非常值得学习。
+
+---
+
+## 6.1 System Prompt 设计
+
+### 动态 Prompt 构建
+
+大多数 Agent 的 system prompt 是一个硬编码的字符串。Pi 不同 —— 它的 prompt 是**动态组装**的，根据当前启用的工具、加载的 Skills、项目上下文文件自适应调整。
+
+<SourceReader
+  client:visible
+  code={codeBuildSystemPromptOptions}
   filename="packages/coding-agent/src/core/system-prompt.ts"
   language="typescript"
   startLine={19}
@@ -88,30 +756,7 @@ import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 <SourceReader
   client:visible
-  code={`// Build guidelines based on which tools are actually available
-const guidelinesList: string[] = [];
-const guidelinesSet = new Set<string>();
-const addGuideline = (guideline: string): void => {
-  if (guidelinesSet.has(guideline)) return;
-  guidelinesSet.add(guideline);
-  guidelinesList.push(guideline);
-};
-
-const hasBash = tools.includes("bash");
-const hasEdit = tools.includes("edit");
-const hasGrep = tools.includes("grep");
-
-// File exploration guidelines
-if (hasBash && !hasGrep && !hasFind && !hasLs) {
-  addGuideline("Use bash for file operations like ls, rg, find");
-} else if (hasBash && (hasGrep || hasFind || hasLs)) {
-  addGuideline("Prefer grep/find/ls tools over bash for file exploration");
-}
-
-// Read before edit guideline
-if (hasRead && hasEdit) {
-  addGuideline("Use read to examine files before editing");
-}`}
+  code={codeAdaptiveGuidelines}
   filename="packages/coding-agent/src/core/system-prompt.ts"
   language="typescript"
   startLine={108}
@@ -131,42 +776,7 @@ if (hasRead && hasEdit) {
 
 <SourceReader
   client:visible
-  code={`const TOOL_GUIDELINES: Record<string, string> = {
-  read_file:
-    "- Always read a file before attempting to modify it.\\n" +
-    "- Use offset/limit for large files instead of reading everything.",
-  write_file:
-    "- Prefer editing existing files over creating new ones.\\n" +
-    "- Always use absolute file paths.",
-  bash:
-    "- Prefer the search tool over \`grep\` or \`find\` commands.\\n" +
-    "- Use bash for running tests, installing packages, or git operations.",
-  search:
-    "- Use search to find code patterns, function definitions, and references.",
-};
-
-export function buildSystemPrompt(options: PromptOptions): string {
-  const { tools, workingDirectory = process.cwd() } = options;
-  const date = new Date().toISOString().split("T")[0];
-
-  let prompt = \`You are a helpful coding assistant...
-
-Environment:
-- Date: \${date}
-- Working directory: \${workingDirectory}
-\`;
-
-  // Add tool-specific guidelines
-  const relevantGuidelines = tools
-    .map((t) => TOOL_GUIDELINES[t])
-    .filter(Boolean);
-
-  if (relevantGuidelines.length > 0) {
-    prompt += \`\\nTool usage:\\n\${relevantGuidelines.join("\\n")}\\n\`;
-  }
-
-  return prompt;
-}`}
+  code={codeToolGuidelines}
   filename="demos/06-my-agent/src/prompt.ts"
   language="typescript"
   startLine={1}
@@ -186,24 +796,7 @@ Pi 的会话存储格式是**带树结构的 JSONL**。每个 entry 都有 `id` 
 
 <SourceReader
   client:visible
-  code={`export interface SessionEntryBase {
-  type: string;
-  id: string;
-  parentId: string | null;
-  timestamp: string;
-}
-
-// 9 种条目类型
-export type SessionEntry =
-  | SessionMessageEntry       // LLM 消息 (user/assistant/toolResult)
-  | ThinkingLevelChangeEntry  // 切换 thinking level
-  | ModelChangeEntry          // 切换模型
-  | CompactionEntry           // 压缩摘要
-  | BranchSummaryEntry        // 分支摘要
-  | CustomEntry               // 扩展自定义数据 (不参与 LLM 上下文)
-  | CustomMessageEntry        // 扩展注入的上下文消息 (参与 LLM 上下文)
-  | LabelEntry                // 用户书签
-  | SessionInfoEntry          // 会话元数据 (显示名等)`}
+  code={codeSessionEntryBase}
   filename="packages/coding-agent/src/core/session-manager.ts"
   language="typescript"
   startLine={43}
@@ -225,47 +818,7 @@ export type SessionEntry =
 
 <SourceReader
   client:visible
-  code={`export const CURRENT_SESSION_VERSION = 3;
-
-/** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
-function migrateV1ToV2(entries: FileEntry[]): void {
-  const ids = new Set<string>();
-  let prevId: string | null = null;
-
-  for (const entry of entries) {
-    if (entry.type === "session") {
-      entry.version = 2;
-      continue;
-    }
-    entry.id = generateId(ids);
-    entry.parentId = prevId;
-    prevId = entry.id;
-  }
-}
-
-/** Migrate v2 → v3: rename hookMessage role to custom. */
-function migrateV2ToV3(entries: FileEntry[]): void {
-  for (const entry of entries) {
-    if (entry.type === "session") { entry.version = 3; continue; }
-    if (entry.type === "message") {
-      const msgEntry = entry as SessionMessageEntry;
-      if ((msgEntry.message as any).role === "hookMessage") {
-        (msgEntry.message as any).role = "custom";
-      }
-    }
-  }
-}
-
-/** Run all necessary migrations to bring entries to current version. */
-function migrateToCurrentVersion(entries: FileEntry[]): boolean {
-  const header = entries.find(e => e.type === "session") as SessionHeader;
-  const version = header?.version ?? 1;
-  if (version >= CURRENT_SESSION_VERSION) return false;
-
-  if (version < 2) migrateV1ToV2(entries);
-  if (version < 3) migrateV2ToV3(entries);
-  return true;
-}`}
+  code={codeSessionMigration}
   filename="packages/coding-agent/src/core/session-manager.ts"
   language="typescript"
   startLine={208}
@@ -283,25 +836,7 @@ LLM 需要线性的消息列表，但 session 是一棵树。`buildSessionContex
 
 <SourceReader
   client:visible
-  code={`/**
- * Build the session context from entries using tree traversal.
- * If leafId is provided, walks from that entry to root.
- * Handles compaction and branch summaries along the path.
- */
-export function buildSessionContext(
-  entries: SessionEntry[],
-  leafId?: string | null,
-  byId?: Map<string, SessionEntry>,
-): SessionContext {
-  // Build uuid index if not available
-  if (!byId) {
-    byId = new Map<string, SessionEntry>();
-    for (const entry of entries) {
-      byId.set(entry.id, entry);
-    }
-  }
-  // ...walk from leaf to root, collect messages along the path
-}`}
+  code={codeBuildSessionContext}
   filename="packages/coding-agent/src/core/session-manager.ts"
   language="typescript"
   startLine={308}
@@ -320,49 +855,12 @@ export function buildSessionContext(
   left={{
     label: "Demo 06 — session.ts",
     language: "typescript",
-    code: `export class Session {
-  private filePath: string;
-  private messages: Message[] = [];
-
-  /** Append a message to the session. */
-  async append(message: Message): Promise<void> {
-    this.messages.push(message);
-    const line = JSON.stringify(message) + "\\n";
-    await appendFile(this.filePath, line, "utf-8");
-  }
-
-  /** Load messages from session file. */
-  async load(): Promise<Message[]> {
-    const content = await readFile(this.filePath, "utf-8");
-    const lines = content.trim().split("\\n").filter(Boolean);
-    this.messages = lines.map(l => JSON.parse(l));
-    return this.messages;
-  }
-}`
+    code: codeDemoSession
   }}
   right={{
     label: "Pi — session-manager.ts",
     language: "typescript",
-    code: `// Pi 的 SessionManager 支持:
-// - 树结构 (id/parentId)
-// - 9 种条目类型
-// - 版本迁移 (v1→v2→v3)
-// - Fork/Branch 操作
-// - 从任意叶子重建线性上下文
-// - HTML/JSONL 导出
-
-export interface SessionEntryBase {
-  type: string;
-  id: string;         // 8-char hex
-  parentId: string | null;
-  timestamp: string;
-}
-
-// buildSessionContext:
-// 从叶子节点 → 根节点回溯收集消息
-// 遇到 CompactionEntry → 注入摘要
-// 遇到 BranchSummary → 注入分支摘要
-// 结果: 线性的 AgentMessage[] 给 LLM`
+    code: codePiSessionManager
   }}
 />
 
@@ -380,44 +878,7 @@ export interface SessionEntryBase {
 
 <SourceReader
   client:visible
-  code={`/**
- * Estimate token count for a message using chars/4 heuristic.
- * This is conservative (overestimates tokens).
- */
-export function estimateTokens(message: AgentMessage): number {
-  let chars = 0;
-
-  switch (message.role) {
-    case "user": {
-      const content = message.content;
-      if (typeof content === "string") {
-        chars = content.length;
-      } else if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block.type === "text" && block.text) {
-            chars += block.text.length;
-          }
-        }
-      }
-      return Math.ceil(chars / 4);
-    }
-    case "assistant": {
-      for (const block of assistant.content) {
-        if (block.type === "text") chars += block.text.length;
-        else if (block.type === "thinking") chars += block.thinking.length;
-        else if (block.type === "toolCall")
-          chars += block.name.length + JSON.stringify(block.arguments).length;
-      }
-      return Math.ceil(chars / 4);
-    }
-    case "toolResult": {
-      // ...similar logic
-      // Images estimated as 4800 chars (≈1200 tokens)
-      return Math.ceil(chars / 4);
-    }
-  }
-  return 0;
-}`}
+  code={codeEstimateTokens}
   filename="packages/coding-agent/src/core/compaction/compaction.ts"
   language="typescript"
   startLine={225}
@@ -437,44 +898,7 @@ export function estimateTokens(message: AgentMessage): number {
 
 <SourceReader
   client:visible
-  code={`/**
- * Find valid cut points: indices of user, assistant, custom, or
- * bashExecution messages.
- * Never cut at tool results (they must follow their tool call).
- */
-function findValidCutPoints(
-  entries: SessionEntry[],
-  startIndex: number,
-  endIndex: number,
-): number[] {
-  const cutPoints: number[] = [];
-  for (let i = startIndex; i < endIndex; i++) {
-    const entry = entries[i];
-    switch (entry.type) {
-      case "message": {
-        const role = entry.message.role;
-        switch (role) {
-          case "user":
-          case "assistant":
-          case "bashExecution":
-          case "custom":
-          case "branchSummary":
-          case "compactionSummary":
-            cutPoints.push(i);
-            break;
-          case "toolResult":
-            break;  // NEVER cut here!
-        }
-        break;
-      }
-    }
-    // branch_summary and custom_message are user-role, valid cut points
-    if (entry.type === "branch_summary" || entry.type === "custom_message") {
-      cutPoints.push(i);
-    }
-  }
-  return cutPoints;
-}`}
+  code={codeFindValidCutPoints}
   filename="packages/coding-agent/src/core/compaction/compaction.ts"
   language="typescript"
   startLine={292}
@@ -504,23 +928,7 @@ function findValidCutPoints(
 
 <SourceReader
   client:visible
-  code={`/**
- * Check if compaction should trigger based on context usage.
- */
-export function shouldCompact(
-  contextTokens: number,
-  contextWindow: number,
-  settings: CompactionSettings,
-): boolean {
-  if (!settings.enabled) return false;
-  return contextTokens > contextWindow - settings.reserveTokens;
-}
-
-export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
-  enabled: true,
-  reserveTokens: 16384,   // 16K reserved for prompt + LLM response
-  keepRecentTokens: 20000, // Keep ~20K tokens of recent conversation
-};`}
+  code={codeShouldCompact}
   filename="packages/coding-agent/src/core/compaction/compaction.ts"
   language="typescript"
   startLine={212}
@@ -536,36 +944,7 @@ Pi 使用一个精心设计的 prompt 让 LLM 生成结构化摘要：
 
 <SourceReader
   client:visible
-  code={`const SUMMARIZATION_PROMPT = \`Create a structured context checkpoint summary
-that another LLM will use to continue the work.
-
-Use this EXACT format:
-
-## Goal
-[What is the user trying to accomplish?]
-
-## Constraints & Preferences
-- [Any constraints or requirements mentioned by user]
-
-## Progress
-### Done
-- [x] [Completed tasks/changes]
-### In Progress
-- [ ] [Current work]
-### Blocked
-- [Issues preventing progress]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale]
-
-## Next Steps
-1. [Ordered list of what should happen next]
-
-## Critical Context
-- [Data, examples, or references needed to continue]
-
-Keep each section concise. Preserve exact file paths, function names,
-and error messages.\`;`}
+  code={codeSummarizationPrompt}
   filename="packages/coding-agent/src/core/compaction/compaction.ts"
   language="typescript"
   startLine={447}
@@ -596,21 +975,7 @@ and error messages.\`;`}
 
 <SourceReader
   client:visible
-  code={`/**
- * Check if an error is retryable (overloaded, rate limit, server errors).
- * Context overflow errors are NOT retryable (handled by compaction instead).
- */
-private _isRetryableError(message: AssistantMessage): boolean {
-  if (message.stopReason !== "error" || !message.errorMessage) return false;
-
-  // Context overflow is handled by compaction, not retry
-  const contextWindow = this.model?.contextWindow ?? 0;
-  if (isContextOverflow(message, contextWindow)) return false;
-
-  const err = message.errorMessage;
-  return /overloaded|rate.?limit|too many requests|429|500|502|503|504
-    |service.?unavailable|connection.?error|fetch failed|timed? out/i.test(err);
-}`}
+  code={codeIsRetryableError}
   filename="packages/coding-agent/src/core/agent-session.ts"
   language="typescript"
   startLine={2334}
@@ -633,35 +998,7 @@ private _isRetryableError(message: AssistantMessage): boolean {
 
 <SourceReader
   client:visible
-  code={`export async function withRetry<T>(
-  fn: () => Promise<T>,
-  options?: RetryOptions,
-): Promise<T> {
-  const opts = { ...DEFAULT_OPTIONS, ...options };
-  let lastError: Error | undefined;
-
-  for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-
-      // Don't retry on final attempt or non-retryable errors
-      if (attempt === opts.maxRetries || !isRetryable(error)) {
-        throw lastError;
-      }
-
-      // Exponential backoff + jitter
-      const exponentialDelay = opts.baseDelayMs * Math.pow(2, attempt);
-      const jitter = Math.random() * opts.baseDelayMs;
-      const delay = Math.min(exponentialDelay + jitter, opts.maxDelayMs);
-
-      opts.onRetry?.(lastError, attempt + 1, delay);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-  throw lastError ?? new Error("Retry failed");
-}`}
+  code={codeWithRetry}
   filename="demos/06-my-agent/src/retry.ts"
   language="typescript"
   startLine={64}
@@ -703,24 +1040,7 @@ Pi 的 API Key 管理也值得一提。`AuthStorage` 使用文件锁（`proper-l
 
 <SourceReader
   client:visible
-  code={`/**
- * Credential storage for API keys and OAuth tokens.
- * Uses file locking to prevent race conditions when multiple pi
- * instances try to refresh tokens simultaneously.
- */
-export class FileAuthStorageBackend implements AuthStorageBackend {
-  constructor(
-    private authPath: string = join(getAgentDir(), "auth.json")
-  ) {}
-
-  private ensureFileExists(): void {
-    if (!existsSync(this.authPath)) {
-      writeFileSync(this.authPath, "{}", "utf-8");
-      chmodSync(this.authPath, 0o600); // Owner read/write only
-    }
-  }
-  // withLock<T>(fn): T — uses proper-lockfile for atomic read-modify-write
-}`}
+  code={codeAuthStorage}
   filename="packages/coding-agent/src/core/auth-storage.ts"
   language="typescript"
   startLine={45}
@@ -748,33 +1068,7 @@ Pi 的配置使用三级合并：Global → Project → CLI，优先级从低到
 
 <SourceReader
   client:visible
-  code={`export interface Settings {
-  defaultProvider?: string;
-  defaultModel?: string;
-  defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-  transport?: TransportSetting;            // "sse" | "http"
-  steeringMode?: "all" | "one-at-a-time";
-  followUpMode?: "all" | "one-at-a-time";
-  theme?: string;
-  compaction?: CompactionSettings;
-  branchSummary?: BranchSummarySettings;
-  retry?: RetrySettings;
-  hideThinkingBlock?: boolean;
-  shellPath?: string;
-  quietStartup?: boolean;
-  packages?: PackageSource[];
-  extensions?: string[];
-  skills?: string[];
-  prompts?: string[];
-  themes?: string[];
-  enableSkillCommands?: boolean;
-  terminal?: TerminalSettings;
-  images?: ImageSettings;
-  enabledModels?: string[];
-  thinkingBudgets?: ThinkingBudgetsSettings;
-  markdown?: MarkdownSettings;
-  // ...50+ fields total
-}`}
+  code={codeSettingsInterface}
   filename="packages/coding-agent/src/core/settings-manager.ts"
   language="typescript"
   startLine={63}
@@ -793,31 +1087,7 @@ Pi 的配置使用三级合并：Global → Project → CLI，优先级从低到
 
 <SourceReader
   client:visible
-  code={`/** Deep merge settings: project/overrides take precedence */
-function deepMergeSettings(base: Settings, overrides: Settings): Settings {
-  const result: Settings = { ...base };
-
-  for (const key of Object.keys(overrides) as (keyof Settings)[]) {
-    const overrideValue = overrides[key];
-    const baseValue = base[key];
-
-    if (overrideValue === undefined) continue;
-
-    // For nested objects, merge recursively
-    if (
-      typeof overrideValue === "object" && overrideValue !== null &&
-      !Array.isArray(overrideValue) &&
-      typeof baseValue === "object" && baseValue !== null &&
-      !Array.isArray(baseValue)
-    ) {
-      (result as any)[key] = { ...baseValue, ...overrideValue };
-    } else {
-      // For primitives and arrays, override value wins
-      (result as any)[key] = overrideValue;
-    }
-  }
-  return result;
-}`}
+  code={codeDeepMergeSettings}
   filename="packages/coding-agent/src/core/settings-manager.ts"
   language="typescript"
   startLine={99}
@@ -846,36 +1116,7 @@ Demo 06 实现了同样的理念，用更简洁的方式：
 
 <SourceReader
   client:visible
-  code={`export interface AgentConfig {
-  model: string;
-  provider: string;
-  apiKey: string;
-  maxTokens: number;
-  thinkingLevel: "none" | "low" | "medium" | "high";
-}
-
-const DEFAULTS: AgentConfig = {
-  model: "claude-sonnet-4-20250514",
-  provider: "anthropic",
-  apiKey: "",
-  maxTokens: 8192,
-  thinkingLevel: "none",
-};
-
-/** Resolve config with three-level merge: defaults → user → env */
-export async function resolveConfig(
-  overrides?: Partial<AgentConfig>,
-): Promise<AgentConfig> {
-  const userConfig = await loadUserConfig();  // ~/.pi-tutorial/config.json
-  const envConfig = loadEnvConfig();           // PI_MODEL, ANTHROPIC_API_KEY, etc.
-
-  return {
-    ...DEFAULTS,
-    ...userConfig,
-    ...envConfig,
-    ...overrides,
-  };
-}`}
+  code={codeAgentConfig}
   filename="demos/06-my-agent/src/config-resolver.ts"
   language="typescript"
   startLine={1}
@@ -1023,26 +1264,7 @@ Demo 06 的 `Agent` 类是前 5 章所有概念的整合：
 
 <SourceReader
   client:visible
-  code={`export class Agent {
-  private client: Anthropic;
-  private config: AgentConfig;
-  private session: Session;
-  private systemPrompt: string;
-  private onEvent: EventHandler;
-  private abortController: AbortController | null = null;
-
-  constructor(config: AgentConfig, options?: {
-    session?: Session;
-    onEvent?: EventHandler;
-  }) {
-    this.config = config;
-    this.client = new Anthropic({ apiKey: config.apiKey });
-    this.session = options?.session ?? new Session();
-    this.onEvent = options?.onEvent ?? (() => {});
-    this.systemPrompt = buildSystemPrompt({
-      tools: ALL_TOOLS.map(t => t.name),
-    });
-  }`}
+  code={codeAgentConstructor}
   filename="demos/06-my-agent/src/agent.ts"
   language="typescript"
   startLine={40}
@@ -1059,91 +1281,7 @@ Demo 06 的 `Agent` 类是前 5 章所有概念的整合：
 
 <SourceReader
   client:visible
-  code={`async prompt(userMessage: string): Promise<string> {
-  this.abortController = new AbortController();
-  const messages = this.session.getMessages();
-  messages.push({ role: "user", content: userMessage });
-  await this.session.append({ role: "user", content: userMessage });
-
-  this.emit({ type: "agent_start", model: this.config.model });
-
-  let turnNumber = 0;
-  const MAX_TURNS = 20;
-
-  while (turnNumber < MAX_TURNS) {
-    if (this.abortController.signal.aborted) break;
-    turnNumber++;
-    this.emit({ type: "turn_start", turnNumber });
-
-    // Call the API with retry (Ch.6.4)
-    const response = await withRetry(
-      () => this.client.messages.create({
-        model: this.config.model,
-        max_tokens: this.config.maxTokens,
-        system: this.systemPrompt,
-        tools: ALL_TOOLS as Anthropic.Messages.Tool[],
-        messages,
-      }),
-      { maxRetries: 3, onRetry: (err, attempt, delay) => {
-        this.emit({ type: "error", error: new Error(
-          \`Retry \${attempt} in \${Math.round(delay)}ms: \${err.message}\`
-        )});
-      }},
-    );
-
-    // Process response content blocks
-    let fullText = "";
-    const toolUseBlocks: Anthropic.Messages.ToolUseBlock[] = [];
-
-    for (const block of response.content) {
-      if (block.type === "text") {
-        fullText += block.text;
-        this.emit({ type: "text_delta", text: block.text });
-      } else if (block.type === "tool_use") {
-        toolUseBlocks.push(block);
-      }
-    }
-
-    // Add assistant message to conversation
-    messages.push({ role: "assistant", content: response.content });
-    await this.session.append({ role: "assistant", content: response.content });
-
-    // If no tool calls, we're done
-    if (toolUseBlocks.length === 0) {
-      this.emit({ type: "agent_end", totalTurns: turnNumber });
-      return fullText;
-    }
-
-    // Execute tool calls (Ch.3)
-    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
-    for (const toolBlock of toolUseBlocks) {
-      if (this.abortController.signal.aborted) break;
-      this.emit({ type: "tool_start", name: toolBlock.name, id: toolBlock.id });
-
-      const executor = TOOL_EXECUTORS[toolBlock.name];
-      let result: string;
-      try {
-        result = executor
-          ? await executor(toolBlock.input as Record<string, unknown>)
-          : \`Unknown tool: \${toolBlock.name}\`;
-      } catch (err) {
-        result = \`Error: \${err instanceof Error ? err.message : String(err)}\`;
-      }
-
-      this.emit({ type: "tool_end", name: toolBlock.name, result });
-      toolResults.push({
-        type: "tool_result", tool_use_id: toolBlock.id, content: result,
-      });
-    }
-
-    // Add tool results to conversation
-    messages.push({ role: "user", content: toolResults });
-    await this.session.append({ role: "user", content: toolResults });
-  }
-
-  this.emit({ type: "agent_end", totalTurns: turnNumber });
-  return "(max turns reached)";
-}`}
+  code={codeAgentPrompt}
   filename="demos/06-my-agent/src/agent.ts"
   language="typescript"
   startLine={65}
@@ -1163,46 +1301,12 @@ Demo 06 的 `Agent` 类是前 5 章所有概念的整合：
   left={{
     label: "Demo 06 — Agent.prompt()",
     language: "typescript",
-    code: `// ~120 行，实现完整 agentic loop:
-// 1. 添加 user message → session
-// 2. while (turnNumber < MAX_TURNS)
-//    a. withRetry → client.messages.create()
-//    b. 处理 text blocks → emit events
-//    c. 处理 tool_use blocks → execute tools
-//    d. tool results → session
-//    e. 无 tool calls → return
-// 3. emit agent_end
-
-// 缺少的特性:
-// - Streaming (使用 create 而非 stream)
-// - Steering/Follow-up 消息队列
-// - 自动 compaction
-// - 溢出恢复
-// - 扩展事件系统`
+    code: codeDemoAgentLoop
   }}
   right={{
     label: "Pi — AgentSession",
     language: "typescript",
-    code: `// AgentSession 在 Agent (core loop) 之上增加:
-class AgentSession {
-  // 事件系统
-  private _eventListeners: AgentSessionEventListener[];
-  // 消息队列
-  private _steeringMessages: string[];
-  private _followUpMessages: string[];
-  // 压缩状态
-  private _overflowRecoveryAttempted = false;
-  // 重试状态
-  private _retryAttempt = 0;
-  // 扩展系统
-  private _extensionRunner: ExtensionRunner;
-
-  // 核心方法: prompt → agent.run →
-  //   _processAgentEvent → 持久化 + 重试 + 压缩
-  // fork → 创建新分支
-  // compact → 手动/自动压缩
-  // cycleModel → 切换模型
-}`
+    code: codePiAgentSession
   }}
 />
 
@@ -1232,64 +1336,7 @@ Pi 在此基础上增加了 `auto_compaction_start/end` 和 `auto_retry_start/en
 
 <SourceReader
   client:visible
-  code={`async function main() {
-  const flags = parseArgs();
-  const mock = await isMockMode();
-
-  // Resolve config (三级合并: defaults → user → env)
-  const config = await resolveConfig({
-    model: flags.model as string | undefined,
-    apiKey: mock ? "mock" : undefined,
-  });
-
-  // Session setup
-  const session = new Session();
-  if (flags.continue) {
-    const loaded = await session.load();
-    if (loaded.length > 0) {
-      console.log(\`Resumed session with \${loaded.length} messages.\`);
-    }
-  }
-
-  console.log("=".repeat(50));
-  console.log("  My Agent - Pi Tutorial Capstone");
-  console.log("=".repeat(50));
-  console.log(\`Model: \${config.model}\`);
-  console.log(\`Mode:  \${mock ? "mock (no API key)" : "live"}\`);
-
-  // Interactive REPL
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-
-  const promptUser = () => {
-    rl.question("> ", async (input) => {
-      const trimmed = input.trim();
-      if (!trimmed) { promptUser(); return; }
-
-      // Handle slash commands
-      if (trimmed.startsWith("/")) {
-        await handleSlashCommand(trimmed, session);
-        promptUser();
-        return;
-      }
-
-      // Real agent call
-      const agent = new Agent(config, {
-        session,
-        onEvent: createEventHandler(),
-      });
-
-      try {
-        await agent.prompt(trimmed);
-      } catch (err) {
-        console.error(\`[Error] \${err instanceof Error ? err.message : err}\`);
-      }
-
-      promptUser();
-    });
-  };
-
-  promptUser();
-}`}
+  code={codeMainRepl}
   filename="demos/06-my-agent/src/main.ts"
   language="typescript"
   startLine={130}

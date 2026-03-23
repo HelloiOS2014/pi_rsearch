@@ -8,6 +8,254 @@ import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
 import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
+export const codeApiProvider = `export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> {
+  api: TApi;
+  stream: StreamFunction<TApi, TOptions>;
+  streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
+}
+
+const apiProviderRegistry = new Map<string, RegisteredApiProvider>();
+
+export function registerApiProvider<TApi extends Api, TOptions extends StreamOptions>(
+  provider: ApiProvider<TApi, TOptions>,
+  sourceId?: string,
+): void {
+  apiProviderRegistry.set(provider.api, {
+    provider: {
+      api: provider.api,
+      stream: wrapStream(provider.api, provider.stream),
+      streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
+    },
+    sourceId,
+  });
+}`;
+
+export const codeWrapStream = `function wrapStream<TApi extends Api, TOptions extends StreamOptions>(
+  api: TApi,
+  stream: StreamFunction<TApi, TOptions>,
+): ApiStreamFunction {
+  return (model, context, options) => {
+    if (model.api !== api) {
+      throw new Error(\`Mismatched api: \${model.api} expected \${api}\`);
+    }
+    return stream(model as Model<TApi>, context, options as TOptions);
+  };
+}`;
+
+export const codeUnregisterProviders = `export function unregisterApiProviders(sourceId: string): void {
+  for (const [api, entry] of apiProviderRegistry.entries()) {
+    if (entry.sourceId === sourceId) {
+      apiProviderRegistry.delete(api);
+    }
+  }
+}`;
+
+export const codeTransformMessages = `export function transformMessages<TApi extends Api>(
+  messages: Message[],
+  model: Model<TApi>,
+  normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
+): Message[] {
+  // Build a map of original tool call IDs to normalized IDs
+  const toolCallIdMap = new Map<string, string>();
+
+  // First pass: transform messages (thinking blocks, tool call ID normalization)
+  const transformed = messages.map((msg) => {
+    // User messages pass through unchanged
+    if (msg.role === "user") {
+      return msg;
+    }
+
+    // Handle toolResult messages - normalize toolCallId if we have a mapping
+    if (msg.role === "toolResult") {
+      const normalizedId = toolCallIdMap.get(msg.toolCallId);
+      if (normalizedId && normalizedId !== msg.toolCallId) {
+        return { ...msg, toolCallId: normalizedId };
+      }
+      return msg;
+    }
+
+    // Assistant messages need transformation check
+    if (msg.role === "assistant") {
+      const assistantMsg = msg as AssistantMessage;
+      const isSameModel =
+        assistantMsg.provider === model.provider &&
+        assistantMsg.api === model.api &&
+        assistantMsg.model === model.id;
+      // ... content transformation
+    }
+    return msg;
+  });
+  // ... second pass: orphan repair
+}`;
+
+export const codeThinkingTransform = `const transformedContent = assistantMsg.content.flatMap((block) => {
+  if (block.type === "thinking") {
+    // Redacted thinking is opaque encrypted content, only valid for the same model.
+    // Drop it for cross-model to avoid API errors.
+    if (block.redacted) {
+      return isSameModel ? block : [];
+    }
+    // For same model: keep thinking blocks with signatures (needed for replay)
+    // even if the thinking text is empty (OpenAI encrypted reasoning)
+    if (isSameModel && block.thinkingSignature) return block;
+    // Skip empty thinking blocks, convert others to plain text
+    if (!block.thinking || block.thinking.trim() === "") return [];
+    if (isSameModel) return block;
+    return {
+      type: "text" as const,
+      text: block.thinking,
+    };
+  }
+  // ...
+});`;
+
+export const codeToolCallIdMapping = `if (block.type === "toolCall") {
+  const toolCall = block as ToolCall;
+  let normalizedToolCall: ToolCall = toolCall;
+
+  if (!isSameModel && toolCall.thoughtSignature) {
+    normalizedToolCall = { ...toolCall };
+    delete (normalizedToolCall as { thoughtSignature?: string }).thoughtSignature;
+  }
+
+  if (!isSameModel && normalizeToolCallId) {
+    const normalizedId = normalizeToolCallId(toolCall.id, model, assistantMsg);
+    if (normalizedId !== toolCall.id) {
+      toolCallIdMap.set(toolCall.id, normalizedId);
+      normalizedToolCall = { ...normalizedToolCall, id: normalizedId };
+    }
+  }
+
+  return normalizedToolCall;
+}`;
+
+export const codeOrphanRepair = `// Second pass: insert synthetic empty tool results for orphaned tool calls
+const result: Message[] = [];
+let pendingToolCalls: ToolCall[] = [];
+let existingToolResultIds = new Set<string>();
+
+for (let i = 0; i < transformed.length; i++) {
+  const msg = transformed[i];
+
+  if (msg.role === "assistant") {
+    // If we have pending orphaned tool calls from a previous assistant, insert synthetic results
+    if (pendingToolCalls.length > 0) {
+      for (const tc of pendingToolCalls) {
+        if (!existingToolResultIds.has(tc.id)) {
+          result.push({
+            role: "toolResult",
+            toolCallId: tc.id,
+            toolName: tc.name,
+            content: [{ type: "text", text: "No result provided" }],
+            isError: true,
+            timestamp: Date.now(),
+          } as ToolResultMessage);
+        }
+      }
+      pendingToolCalls = [];
+      existingToolResultIds = new Set();
+    }
+
+    // Skip errored/aborted assistant messages entirely.
+    const assistantMsg = msg as AssistantMessage;
+    if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
+      continue;
+    }
+
+    // Track tool calls from this assistant message
+    const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
+    if (toolCalls.length > 0) {
+      pendingToolCalls = toolCalls;
+      existingToolResultIds = new Set();
+    }
+
+    result.push(msg);
+  } else if (msg.role === "toolResult") {
+    existingToolResultIds.add(msg.toolCallId);
+    result.push(msg);
+  } else if (msg.role === "user") {
+    // User message interrupts tool flow - insert synthetic results for orphaned calls
+    if (pendingToolCalls.length > 0) {
+      for (const tc of pendingToolCalls) {
+        if (!existingToolResultIds.has(tc.id)) {
+          result.push({
+            role: "toolResult",
+            toolCallId: tc.id,
+            toolName: tc.name,
+            content: [{ type: "text", text: "No result provided" }],
+            isError: true,
+            timestamp: Date.now(),
+          } as ToolResultMessage);
+        }
+      }
+      pendingToolCalls = [];
+      existingToolResultIds = new Set();
+    }
+    result.push(msg);
+  }
+}`;
+
+export const codeSanitizeSurrogates = `/**
+ * Removes unpaired Unicode surrogate characters from a string.
+ *
+ * Unpaired surrogates (high surrogates 0xD800-0xDBFF without matching low surrogates 0xDC00-0xDFFF,
+ * or vice versa) cause JSON serialization errors in many API providers.
+ *
+ * Valid emoji and other characters outside the Basic Multilingual Plane use properly paired
+ * surrogates and will NOT be affected by this function.
+ *
+ * @param text - The text to sanitize
+ * @returns The sanitized text with unpaired surrogates removed
+ */
+export function sanitizeSurrogates(text: string): string {
+  // Replace unpaired high surrogates (0xD800-0xDBFF not followed by low surrogate)
+  // Replace unpaired low surrogates (0xDC00-0xDFFF not preceded by high surrogate)
+  return text.replace(/[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]/g, "");
+}`;
+
+export const codePiProviderRegistry = `// Pi: 类型安全的泛型注册
+interface ApiProvider<TApi extends Api, TOptions extends StreamOptions> {
+  api: TApi;
+  stream: StreamFunction<TApi, TOptions>;
+  streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
+}
+
+// 注册时类型检查
+registerApiProvider({
+  api: "anthropic",
+  stream: streamAnthropic,
+  streamSimple: streamAnthropicSimple,
+}, "oauth-session-123");
+
+// wrapStream 运行时守卫
+if (model.api !== api) {
+  throw new Error("Mismatched api");
+}
+
+// 按 sourceId 批量卸载
+unregisterApiProviders("oauth-session-123");`;
+
+export const codeSimpleRegistry = `// 简化：字符串类型，单一 stream
+class ProviderRegistry {
+  private providers = new Map<string, StreamFn>();
+
+  register(name: string, streamFn: StreamFn) {
+    this.providers.set(name, streamFn);
+  }
+
+  async *stream(provider: string, model: string, messages) {
+    const fn = this.providers.get(provider);
+    if (!fn) throw new Error("Unknown provider");
+    yield* fn({ model, messages });
+  }
+}
+
+// 没有 streamSimple
+// 没有 sourceId 卸载
+// 没有运行时类型守卫
+// 没有泛型约束`;
+
+
 # 多模型统一
 
 想象这个场景：你用 Claude 对话了 3 轮，Claude 调用了 2 次工具，上下文中有 tool call ID、thinking blocks、text signatures。现在你想切换到 GPT 继续对话。
@@ -47,27 +295,7 @@ Pi 的 Provider 注册系统实现在 `api-registry.ts` 中，核心只有一个
 
 <SourceReader
   client:visible
-  code={`export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> {
-  api: TApi;
-  stream: StreamFunction<TApi, TOptions>;
-  streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
-}
-
-const apiProviderRegistry = new Map<string, RegisteredApiProvider>();
-
-export function registerApiProvider<TApi extends Api, TOptions extends StreamOptions>(
-  provider: ApiProvider<TApi, TOptions>,
-  sourceId?: string,
-): void {
-  apiProviderRegistry.set(provider.api, {
-    provider: {
-      api: provider.api,
-      stream: wrapStream(provider.api, provider.stream),
-      streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
-    },
-    sourceId,
-  });
-}`}
+  code={codeApiProvider}
   filename="packages/ai/src/api-registry.ts"
   language="typescript"
   startLine={23}
@@ -89,17 +317,7 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 
 <SourceReader
   client:visible
-  code={`function wrapStream<TApi extends Api, TOptions extends StreamOptions>(
-  api: TApi,
-  stream: StreamFunction<TApi, TOptions>,
-): ApiStreamFunction {
-  return (model, context, options) => {
-    if (model.api !== api) {
-      throw new Error(\`Mismatched api: \${model.api} expected \${api}\`);
-    }
-    return stream(model as Model<TApi>, context, options as TOptions);
-  };
-}`}
+  code={codeWrapStream}
   filename="packages/ai/src/api-registry.ts"
   language="typescript"
   startLine={42}
@@ -128,13 +346,7 @@ if (selectedModel.api === "anthropic") {
 
 <SourceReader
   client:visible
-  code={`export function unregisterApiProviders(sourceId: string): void {
-  for (const [api, entry] of apiProviderRegistry.entries()) {
-    if (entry.sourceId === sourceId) {
-      apiProviderRegistry.delete(api);
-    }
-  }
-}`}
+  code={codeUnregisterProviders}
   filename="packages/ai/src/api-registry.ts"
   language="typescript"
   startLine={88}
@@ -252,43 +464,7 @@ Pi 的 `transformMessages` 函数实现了一个三阶段管道：内容转换 �
 
 <SourceReader
   client:visible
-  code={`export function transformMessages<TApi extends Api>(
-  messages: Message[],
-  model: Model<TApi>,
-  normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
-): Message[] {
-  // Build a map of original tool call IDs to normalized IDs
-  const toolCallIdMap = new Map<string, string>();
-
-  // First pass: transform messages (thinking blocks, tool call ID normalization)
-  const transformed = messages.map((msg) => {
-    // User messages pass through unchanged
-    if (msg.role === "user") {
-      return msg;
-    }
-
-    // Handle toolResult messages - normalize toolCallId if we have a mapping
-    if (msg.role === "toolResult") {
-      const normalizedId = toolCallIdMap.get(msg.toolCallId);
-      if (normalizedId && normalizedId !== msg.toolCallId) {
-        return { ...msg, toolCallId: normalizedId };
-      }
-      return msg;
-    }
-
-    // Assistant messages need transformation check
-    if (msg.role === "assistant") {
-      const assistantMsg = msg as AssistantMessage;
-      const isSameModel =
-        assistantMsg.provider === model.provider &&
-        assistantMsg.api === model.api &&
-        assistantMsg.model === model.id;
-      // ... content transformation
-    }
-    return msg;
-  });
-  // ... second pass: orphan repair
-}`}
+  code={codeTransformMessages}
   filename="packages/ai/src/providers/transform-messages.ts"
   language="typescript"
   startLine={8}
@@ -307,26 +483,7 @@ Pi 的 `transformMessages` 函数实现了一个三阶段管道：内容转换 �
 
 <SourceReader
   client:visible
-  code={`const transformedContent = assistantMsg.content.flatMap((block) => {
-  if (block.type === "thinking") {
-    // Redacted thinking is opaque encrypted content, only valid for the same model.
-    // Drop it for cross-model to avoid API errors.
-    if (block.redacted) {
-      return isSameModel ? block : [];
-    }
-    // For same model: keep thinking blocks with signatures (needed for replay)
-    // even if the thinking text is empty (OpenAI encrypted reasoning)
-    if (isSameModel && block.thinkingSignature) return block;
-    // Skip empty thinking blocks, convert others to plain text
-    if (!block.thinking || block.thinking.trim() === "") return [];
-    if (isSameModel) return block;
-    return {
-      type: "text" as const,
-      text: block.thinking,
-    };
-  }
-  // ...
-});`}
+  code={codeThinkingTransform}
   filename="packages/ai/src/providers/transform-messages.ts"
   language="typescript"
   startLine={40}
@@ -358,25 +515,7 @@ Tool call ID 的转换在第一阶段的 toolCall block 处理中完成：
 
 <SourceReader
   client:visible
-  code={`if (block.type === "toolCall") {
-  const toolCall = block as ToolCall;
-  let normalizedToolCall: ToolCall = toolCall;
-
-  if (!isSameModel && toolCall.thoughtSignature) {
-    normalizedToolCall = { ...toolCall };
-    delete (normalizedToolCall as { thoughtSignature?: string }).thoughtSignature;
-  }
-
-  if (!isSameModel && normalizeToolCallId) {
-    const normalizedId = normalizeToolCallId(toolCall.id, model, assistantMsg);
-    if (normalizedId !== toolCall.id) {
-      toolCallIdMap.set(toolCall.id, normalizedId);
-      normalizedToolCall = { ...normalizedToolCall, id: normalizedId };
-    }
-  }
-
-  return normalizedToolCall;
-}`}
+  code={codeToolCallIdMapping}
   filename="packages/ai/src/providers/transform-messages.ts"
   language="typescript"
   startLine={67}
@@ -396,71 +535,7 @@ ID 映射的关键是 **双向一致性**：tool_call 中的 ID 改了，对应�
 
 <SourceReader
   client:visible
-  code={`// Second pass: insert synthetic empty tool results for orphaned tool calls
-const result: Message[] = [];
-let pendingToolCalls: ToolCall[] = [];
-let existingToolResultIds = new Set<string>();
-
-for (let i = 0; i < transformed.length; i++) {
-  const msg = transformed[i];
-
-  if (msg.role === "assistant") {
-    // If we have pending orphaned tool calls from a previous assistant, insert synthetic results
-    if (pendingToolCalls.length > 0) {
-      for (const tc of pendingToolCalls) {
-        if (!existingToolResultIds.has(tc.id)) {
-          result.push({
-            role: "toolResult",
-            toolCallId: tc.id,
-            toolName: tc.name,
-            content: [{ type: "text", text: "No result provided" }],
-            isError: true,
-            timestamp: Date.now(),
-          } as ToolResultMessage);
-        }
-      }
-      pendingToolCalls = [];
-      existingToolResultIds = new Set();
-    }
-
-    // Skip errored/aborted assistant messages entirely.
-    const assistantMsg = msg as AssistantMessage;
-    if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
-      continue;
-    }
-
-    // Track tool calls from this assistant message
-    const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
-    if (toolCalls.length > 0) {
-      pendingToolCalls = toolCalls;
-      existingToolResultIds = new Set();
-    }
-
-    result.push(msg);
-  } else if (msg.role === "toolResult") {
-    existingToolResultIds.add(msg.toolCallId);
-    result.push(msg);
-  } else if (msg.role === "user") {
-    // User message interrupts tool flow - insert synthetic results for orphaned calls
-    if (pendingToolCalls.length > 0) {
-      for (const tc of pendingToolCalls) {
-        if (!existingToolResultIds.has(tc.id)) {
-          result.push({
-            role: "toolResult",
-            toolCallId: tc.id,
-            toolName: tc.name,
-            content: [{ type: "text", text: "No result provided" }],
-            isError: true,
-            timestamp: Date.now(),
-          } as ToolResultMessage);
-        }
-      }
-      pendingToolCalls = [];
-      existingToolResultIds = new Set();
-    }
-    result.push(msg);
-  }
-}`}
+  code={codeOrphanRepair}
   filename="packages/ai/src/providers/transform-messages.ts"
   language="typescript"
   startLine={98}
@@ -607,23 +682,7 @@ Pi 的解决方案是 **预计算 + 主动截断**：在发送请求前估算 to
 
 <SourceReader
   client:visible
-  code={`/**
- * Removes unpaired Unicode surrogate characters from a string.
- *
- * Unpaired surrogates (high surrogates 0xD800-0xDBFF without matching low surrogates 0xDC00-0xDFFF,
- * or vice versa) cause JSON serialization errors in many API providers.
- *
- * Valid emoji and other characters outside the Basic Multilingual Plane use properly paired
- * surrogates and will NOT be affected by this function.
- *
- * @param text - The text to sanitize
- * @returns The sanitized text with unpaired surrogates removed
- */
-export function sanitizeSurrogates(text: string): string {
-  // Replace unpaired high surrogates (0xD800-0xDBFF not followed by low surrogate)
-  // Replace unpaired low surrogates (0xDC00-0xDFFF not preceded by high surrogate)
-  return text.replace(/[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]/g, "");
-}`}
+  code={codeSanitizeSurrogates}
   filename="packages/ai/src/utils/sanitize-unicode.ts"
   language="typescript"
   startLine={1}
@@ -892,50 +951,12 @@ demos/05-multi-model/src/08-custom-model.ts
   left={{
     label: "Pi 的 ApiProvider",
     language: "typescript",
-    code: `// Pi: 类型安全的泛型注册
-interface ApiProvider<TApi extends Api, TOptions extends StreamOptions> {
-  api: TApi;
-  stream: StreamFunction<TApi, TOptions>;
-  streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
-}
-
-// 注册时类型检查
-registerApiProvider({
-  api: "anthropic",
-  stream: streamAnthropic,
-  streamSimple: streamAnthropicSimple,
-}, "oauth-session-123");
-
-// wrapStream 运行时守卫
-if (model.api !== api) {
-  throw new Error("Mismatched api");
-}
-
-// 按 sourceId 批量卸载
-unregisterApiProviders("oauth-session-123");`
+    code: codePiProviderRegistry
   }}
   right={{
     label: "简化版 Registry",
     language: "typescript",
-    code: `// 简化：字符串类型，单一 stream
-class ProviderRegistry {
-  private providers = new Map<string, StreamFn>();
-
-  register(name: string, streamFn: StreamFn) {
-    this.providers.set(name, streamFn);
-  }
-
-  async *stream(provider: string, model: string, messages) {
-    const fn = this.providers.get(provider);
-    if (!fn) throw new Error("Unknown provider");
-    yield* fn({ model, messages });
-  }
-}
-
-// 没有 streamSimple
-// 没有 sourceId 卸载
-// 没有运行时类型守卫
-// 没有泛型约束`
+    code: codeSimpleRegistry
   }}
 />
 
