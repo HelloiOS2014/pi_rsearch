@@ -50,7 +50,25 @@ Agent 的核心能力是 **自主决策**：它自己判断何时使用什么工
 
 ---
 
-## 1.2 Pi 架构鸟瞰
+## 1.2 Agent 的边界
+
+不是所有任务都需要 Agent。在用 Agent 之前，先问自己：这个任务需要工具吗？需要多步骤吗？
+
+| 任务 | 用 Agent？ | 理由 |
+|------|:---:|------|
+| 翻译一段文字 | 否 | 单次 LLM 调用足够 |
+| 写一首诗 | 否 | 纯文本生成，不需要工具 |
+| 修复代码 bug | 是 | 需要读文件 → 定位 → 编辑 → 测试 |
+| 分析 CSV 数据 | 是 | 需要读取 → 查询 → 生成图表 |
+| 回答 "1+1=?" | 否 | 过度工程化的反面案例 |
+
+过度使用 Agent 的代价：启动 Agent Loop + 加载工具系统 + 0 次工具调用 = 白白浪费 token 和延迟。
+
+**经验法则**：如果任务需要 2 步以上的外部操作（读写文件、执行命令、调用 API），用 Agent。否则直接调 LLM。
+
+---
+
+## 1.3 Pi 架构鸟瞰
 
 Pi 是一个开源的 coding agent，用 TypeScript 实现，代码量约 1,900 行核心代码。它的架构分为三层，每层职责清晰：
 
@@ -315,7 +333,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 
 ---
 
-## 1.3 5 分钟跑通 Pi
+## 1.4 5 分钟跑通 Pi
 
 ### 安装
 
@@ -370,7 +388,7 @@ pi -p "创建一个 hello.ts 文件，内容是打印 Hello World"
 
 ---
 
-## 1.4 动手：30 行最小 Agent
+## 1.5 动手：30 行最小 Agent
 
 现在我们从零开始，分三步构建一个最小 Agent。通过对比，你会清晰地看到 Agent 和普通 LLM 调用的本质区别。
 
@@ -545,7 +563,27 @@ while (true) {
 
 ---
 
-## 1.5 本章小结
+## 1.6 从 30 行到 100 行
+
+Chapter 1 的 30 行 Agent 能工作，但有三个明显问题：
+
+1. **只有一个工具** — 真实 Agent 需要多个工具协同
+2. **没有事件** — 你不知道 Agent 内部发生了什么
+3. **工具出错就崩溃** — 没有错误处理
+
+Demo `04-bridge-100.ts` 解决了这三个问题，把 30 行扩展到约 100 行：
+
+```bash
+npx tsx demos/01-hello-agent/src/04-bridge-100.ts
+```
+
+运行后观察输出：你会看到事件标记（`[turn_start]`、`[tool_call]`、`[tool_result]`）穿插在执行流程中。这些事件就是 Chapter 2 的核心概念。
+
+> 这个 100 行版本就是 Chapter 2 的起点。Pi 在它的基础上加了 Steering（中途插话）、Follow-up（追问续命）和 Abort（优雅中断）。
+
+---
+
+## 1.7 本章小结
 
 三个核心认知：
 
@@ -554,3 +592,21 @@ while (true) {
 3. **Pi 用约 1,900 行核心代码证明了这个循环可以做到和 Claude Code 竞争** — 架构简洁不等于功能简单
 
 下一章，我们将深入 Pi 的核心循环实现 — `agentLoop()` 函数，看看从我们的 30 行 demo 到生产级 Agent，还需要解决哪些问题。
+
+---
+
+## 练习
+
+### 练习 1：给 Agent 加一个新工具 `list_files`
+
+- **修改文件**：`demos/01-hello-agent/src/03-agent-loop.ts`
+- **做什么**：定义 `list_files` 工具（参数: `directory: string`），在 `executeTool` 中实现对应分支（用 `fs.readdirSync`）
+- **预期行为**：Agent 收到"列出 demos 目录的文件"时，调用 `list_files` 返回文件列表
+- **需要 API Key**：否（mock 模式下手动验证 schema）
+
+### 练习 2：修改退出条件
+
+- **修改文件**：`demos/01-hello-agent/src/03-agent-loop.ts`
+- **做什么**：改为"连续 2 轮无工具调用才退出"（而不是 1 轮就退出）
+- **预期行为**：Agent 在没有工具调用后还会再问 LLM 一次确认，然后才退出
+- **需要 API Key**：否

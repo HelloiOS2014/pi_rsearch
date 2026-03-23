@@ -98,6 +98,8 @@ export * from "./types.js";`}
 **第一阶段：基础** — 建立核心认知
 
 - Chapter 1：Agent 核心概念。理解 Tool Use 协议、消息流转、Agent 与 LLM 的本质区别
+  - 1.2 Agent 的边界（新增）— 不是所有任务都需要 Agent，学会判断何时该用、何时不该用
+  - 1.5 从 30 行到 100 行（新增）— 从最小 Agent 到生产级 Agent 的过渡桥梁
 - Chapter 2：核心循环。逐行拆解 `agentLoop`，理解 think-act-observe 循环的实现
 
 **第二阶段：机制** — 深入关键子系统
@@ -112,6 +114,8 @@ export * from "./types.js";`}
 **第四阶段：构建与拓展** — 从理解到创造
 
 - Chapter 6：构建完整 Agent。整合前 5 章知识，从零构建一个可用的 Coding Agent
+  - 6.6 成本与约束（新增）— Token 计费、预算控制、生产环境的经济学
+  - 6.8 毕业项目（新增）— 综合运用全部知识，独立构建一个完整 Agent
 - Chapter 7：框架对比。横向对比 Pi、LangChain、Vercel AI SDK 等框架的设计取舍
 - Chapter 8：进阶话题。多 Agent 协作、安全沙箱、性能优化等生产环境话题
 
@@ -121,28 +125,58 @@ export * from "./types.js";`}
 
 ## 环境准备
 
-开始之前，确保准备好以下环境：
+开始之前，按照以下清单逐步完成环境配置。
 
-**Node.js 20+**（推荐 22）。本教程的所有 Demo 代码基于 TypeScript 编写，使用 `tsx` 直接运行。
+### Step 1: 安装 Node.js 20+
+
+本教程的所有 Demo 代码基于 TypeScript 编写，使用 `tsx` 直接运行，需要 Node.js 20 或更高版本（推荐 22）。
+
+- **Mac / Linux**：
+  ```bash
+  curl -fsSL https://fnm.vercel.app/install | bash && fnm install 22
+  ```
+- **Windows**：下载 https://nodejs.org/ LTS 版本安装
+- **验证**：
+  ```bash
+  node --version  # 应显示 v22.x.x
+  ```
+
+### Step 2: 配置 API Key（可选，有 Mock 模式）
+
+推荐使用 Anthropic Claude，教程中的示例默认使用它。
+
+- **Mac / Linux**：
+  ```bash
+  export ANTHROPIC_API_KEY="sk-ant-..."
+  ```
+  加入 `~/.zshrc` 或 `~/.bashrc` 可永久生效。
+- **Windows PowerShell**：
+  ```powershell
+  $env:ANTHROPIC_API_KEY="sk-ant-..."
+  ```
+- **跨平台推荐**：在项目根目录创建 `.env` 文件：
+  ```
+  ANTHROPIC_API_KEY=sk-ant-...
+  ```
+- **没有 API Key？** 所有 Demo 支持 Mock 模式，可以先跳过这一步。
+
+### Step 3: 克隆项目
 
 ```bash
-node --version  # 确认 >= 20
+git clone --recurse-submodules https://github.com/HelloiOS2014/pi_rsearch.git
+cd pi_rsearch && npm install
 ```
 
-**API Key**。至少需要一个 LLM Provider 的 API Key。推荐使用 Anthropic Claude，教程中的示例默认使用它。
+### Step 4: 验证
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+npx tsx demos/01-hello-agent/src/01-raw-llm-call.ts
+# 应显示 "Mock 模式" 或 LLM 回复
 ```
 
-**Pi 源码**。教程已内置 Pi 的核心源码引用，无需额外克隆。如果你想本地浏览完整代码：
+如果看到输出（无论是 Mock 回复还是真实 LLM 回复），说明环境配置成功。
 
-```bash
-git clone https://github.com/AshkanAe/pi.git
-cd pi && npm install
-```
-
-**代码编辑器**。推荐 VS Code，安装 TypeScript 相关插件以获得类型提示和跳转支持。
+**代码编辑器**：推荐 VS Code，安装 TypeScript 相关插件以获得类型提示和跳转支持。
 
 ---
 
