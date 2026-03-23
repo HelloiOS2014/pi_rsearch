@@ -1089,7 +1089,7 @@ for await (const event of session.send("帮我写一个 TODO app")) {
 最简单的扩展模式 —— 监听 `tool_call` 事件，记录日志，拦截危险操作：
 
 ```bash
-cd demos/08-extensions && npx tsx src/01-simple-extension.ts
+npx tsx demos/08-extensions/src/01-simple-extension.ts
 ```
 
 ```
@@ -1294,3 +1294,25 @@ Agent 技术正处于快速迭代期。你今天学到的具体 API 可能会变
 Pi 的源码是一本活教材。它的每一行代码都值得细读 —— 不是因为它完美，而是因为它的每个设计决策都有清晰的 trade-off。读懂这些 trade-off，你就能在自己的项目中做出更好的决策。
 
 感谢你完成了这个教程。现在，去构建你自己的 Agent 吧。
+
+---
+
+## 动手练习
+
+### 练习 1：写一个简单的扩展 — 命令计数器
+
+**做什么**：参考 `demos/08-extensions/src/01-simple-extension.ts`，写一个扩展统计 Agent 运行期间调用了多少次工具，在 Agent 结束时打印总计。
+
+**预期行为**：Agent 运行结束后输出 `"本次共调用了 X 次工具"`。
+
+**需要 API Key**：否
+
+### 练习 2：给 Demo 08-02 的自定义工具加输入验证
+
+**修改文件**：`demos/08-extensions/src/02-custom-tool-ext.ts`
+
+**做什么**：在工具执行前检查参数是否符合 schema（简单类型检查即可）。
+
+**预期行为**：传入错误参数时返回 `"参数验证失败: expected string, got number"`。
+
+**需要 API Key**：否

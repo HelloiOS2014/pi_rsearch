@@ -16,12 +16,20 @@ console.log(`输入你的问题，输入 /exit 退出。\n`);
 
 // ── Mock 模式响应 ─────────────────────────────────────────────
 const MOCK_RESPONSES = [
-  "Mock 模式：我会调用你定义的工具来完成这个任务。\n" +
-    "设置 ANTHROPIC_API_KEY 环境变量以使用真实 API。",
-  "Mock 模式：在真实模式下，我会：\n" +
-    "1. 分析你的请求\n" +
-    "2. 选择合适的工具\n" +
-    "3. 执行工具并返回结果",
+  `[Mock 模式] 模拟 Agent 执行流程:
+  1. LLM 决定调用工具 read_csv({path: "fixtures/data-analysis/sales.csv"})
+  2. 工具返回: 文件: sales.csv, 总行数: 20
+  3. LLM 根据结果回答: "这个CSV包含20条销售记录..."
+
+提示: 配置 ANTHROPIC_API_KEY 后可使用真实 LLM。
+提示: 直接测试工具逻辑: npx tsx -e "import {executeReadCsv} from './src/tools/read_csv.js'; executeReadCsv({path:'fixtures/data-analysis/sales.csv'}).then(console.log)"`,
+  `[Mock 模式] 模拟 Agent 执行流程:
+  1. LLM 决定调用工具 list_files({directory: "."})
+  2. 工具返回: ["src/", "fixtures/", "package.json", "tsconfig.json"]
+  3. LLM 根据结果回答: "当前目录包含 4 个条目..."
+
+提示: 配置 ANTHROPIC_API_KEY 后可使用真实 LLM。
+提示: 直接测试工具逻辑: npx tsx -e "import {executeListFiles} from './src/tools/list_files.js'; executeListFiles({directory:'.'}).then(console.log)"`,
 ];
 
 // ── REPL ─────────────────────────────────────────────────────

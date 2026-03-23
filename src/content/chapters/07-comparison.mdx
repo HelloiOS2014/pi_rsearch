@@ -475,12 +475,12 @@ console.log(result.text);
 ### 运行 Demo 07
 
 ```bash
-cd demos/07-comparison && npm install
+npm install --prefix demos/07-comparison
 
 # 分别运行三种风格
-npx tsx src/pi-style.ts
-npx tsx src/langchain-style.ts
-npx tsx src/vercel-ai-style.ts
+npx tsx demos/07-comparison/src/pi-style.ts
+npx tsx demos/07-comparison/src/langchain-style.ts
+npx tsx demos/07-comparison/src/vercel-ai-style.ts
 ```
 
 观察输出差异：
@@ -551,6 +551,33 @@ npx tsx src/vercel-ai-style.ts
 - 看到 `provider.stream()`，你知道它是 Provider Abstraction 模式
 
 有了这些模式识别能力，你可以快速读懂任何新的 Agent 框架 —— 甚至设计自己的框架。
+
+---
+
+## 动手练习
+
+### 练习 1：用三种风格实现"文件行数统计"
+
+**做什么**：阅读 `demos/07-comparison/` 的三个文件（`pi-style.ts`、`langchain-style.ts`、`vercel-ai-style.ts`），理解同一任务的不同实现。
+
+```bash
+# 阅读三种风格的源码
+cat demos/07-comparison/src/pi-style.ts
+cat demos/07-comparison/src/langchain-style.ts
+cat demos/07-comparison/src/vercel-ai-style.ts
+```
+
+**思考题**：如果你要加一个新功能（比如"统计完后发送邮件通知"），哪种风格最容易扩展？为什么？
+
+**需要 API Key**：否（阅读和思考为主）
+
+### 练习 2：设计你自己的对比维度
+
+**做什么**：除了教程中列出的对比维度（循环模式、工具系统、流式处理），再想一个你关心的维度（比如"调试难度"或"团队协作友好度"），并用 1-2 段话分析三个框架在这个维度上的表现。
+
+**需要 API Key**：否
+
+---
 
 ### 下一章预告
 
