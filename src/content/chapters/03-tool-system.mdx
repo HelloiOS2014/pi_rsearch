@@ -88,6 +88,14 @@ export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T
 
 这意味着工具可以告诉 LLM "Successfully replaced text in file.ts"（简洁的 content），同时给 UI 发送完整的 diff 预览（丰富的 details）。LLM 不需要处理大量的 diff 信息，UI 却能展示完整的变更。
 
+### 为什么需要 Schema 验证？
+
+因为 LLM 的输出不可信。
+
+你定义了一个 bash 工具，参数是 `{command: string}`。但 LLM 可能返回 `{command: 42}` 或 `{cmd: "ls"}` 或空对象 `{}`。没有验证，你的 executeTool 会在运行时崩溃。
+
+Pi 用 TypeBox（不是 Zod）来定义 schema。为什么？因为 TypeBox 直接生成标准 JSON Schema，LLM 需要这个格式来理解工具参数。Zod 需要额外转换才能生成 JSON Schema。
+
 ### 为什么选择 TypeBox 而不是 Zod？
 
 Pi 使用 `@sinclair/typebox` 而不是更流行的 Zod 来定义工具参数 Schema。原因很直接：
@@ -408,9 +416,11 @@ const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 await ops.writeFile(absolutePath, finalContent);
 ```
 
-### 可插拔的 Operations 接口
+### 可插拔操作模式（Pluggable Operations Pattern）
 
-注意 bash 和 edit 工具都定义了 Operations 接口（`BashOperations`、`EditOperations`）。这是一个精心设计的**策略模式**：
+注意 Pi 的 bash 工具不直接调用 `child_process.exec`，而是通过 `BashOperations` 接口间接调用。这种**可插拔操作模式（Pluggable Operations Pattern）**让同一个工具定义能在不同环境下执行：本地直接运行、SSH 远程执行、Docker 沙箱执行。你只需要替换 Operations 实现，不用改工具逻辑。
+
+bash 和 edit 工具都定义了 Operations 接口（`BashOperations`、`EditOperations`）：
 
 <CodeComparison
   client:visible
@@ -1083,6 +1093,51 @@ AgentLoopConfig
     → [Phase 2] execute: tool.execute() (并发)
     → [Phase 3] finalize: afterToolCall → emit (按序)
     → ToolResultMessage[] 送回 LLM
+```
+
+### 课后练习
+
+**练习 1：用 TypeBox 定义一个 `web_search` 工具**
+
+- **做什么**：定义 schema（`query: string`, `maxResults: number`），写一个 mock execute 函数
+- **预期行为**：LLM 调用 `web_search({query: "Pi Agent", maxResults: 5})` → 返回模拟搜索结果
+- **需要 API Key**：否
+
+```typescript
+import { Type, type Static } from '@sinclair/typebox';
+
+const webSearchSchema = Type.Object({
+  query: Type.String({ description: "Search query" }),
+  maxResults: Type.Optional(Type.Number({ description: "Max results to return", default: 10 })),
+});
+
+type WebSearchInput = Static<typeof webSearchSchema>;
+
+async function executeWebSearch(params: WebSearchInput): Promise<string> {
+  // TODO: 返回模拟搜索结果
+  // 提示：构造一个包含 params.maxResults 条结果的数组，每条包含 title 和 url
+  return JSON.stringify([
+    { title: `Result for "${params.query}"`, url: "https://example.com" }
+  ]);
+}
+```
+
+**练习 2：给 Demo 03-04 的 beforeToolCall hook 加安全规则**
+
+- **修改文件**：`demos/03-tool-system/src/04-hooks.ts`
+- **做什么**：如果工具名是 `"delete_file"`，block 并返回 `"Dangerous operation blocked"`
+- **预期行为**：Agent 尝试调用 delete_file 时被拦截，LLM 收到 block 消息并换其他方法
+- **需要 API Key**：否
+
+```typescript
+// 在 beforeToolCall 钩子中添加安全规则：
+beforeToolCall: async ({ toolCall }) => {
+  if (toolCall.name === "delete_file") {
+    return { block: true, reason: "Dangerous operation blocked" };
+  }
+  // 其他工具正常放行
+  return undefined;
+},
 ```
 
 ### 下一章预告

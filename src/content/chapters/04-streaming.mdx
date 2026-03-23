@@ -16,6 +16,14 @@ import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 ## 4.1 EventStream 核心
 
+### 为什么需要 EventStream？
+
+想象 LLM 正在生成一个 500 字的回复。如果你等它全部生成完再显示，用户要盯着空白屏幕看 5 秒。如果你逐字符显示，用户看到打字效果，体验完全不同。
+
+但 LLM（生产者）和 UI（消费者）速度不同。LLM 可能一次输出 10 个 token，UI 可能还在渲染上一批。不协调就会：内存爆炸（生产者太快）或卡顿（消费者太慢）。
+
+EventStream 就是协调生产者和消费者的管道。
+
 ### 问题：异步生产者与消费者如何协调？
 
 LLM 的流式响应是一个典型的 "生产者-消费者" 问题：LLM 以不可控的速率产出 token，UI 需要按自己的节奏消费。同时，使用者可能需要两种消费模式：逐事件处理（实时 UI 更新）或等待最终结果（获取完整消息）。
@@ -305,6 +313,16 @@ for await (const event of stream) {
 | `"toolUse"` | 模型请求工具调用 | Agent 执行工具后继续循环 |
 | `"aborted"` | 用户或系统取消 | 清理资源，可用部分内容 |
 | `"error"` | 运行时错误 | 重试或报告错误 |
+
+### 为什么两套事件？
+
+AssistantMessageEvent（13 种）是 LLM 层的细粒度事件 — 每个文字片段（text_delta）、每个工具参数片段（toolcall_delta）都有对应事件。
+
+AgentEvent（12 种）是应用层的生命周期事件 — 标记一轮对话的开始/结束（turn_start/end）、工具执行的开始/结束（tool_execution_start/end）。
+
+类比：AssistantMessageEvent 像 TCP 包（每个字节都有），AgentEvent 像 HTTP 请求/响应（一次完整交互）。
+
+通常：UI 层消费 AgentEvent（关心"这轮完成了吗"），调试/日志层消费 AssistantMessageEvent（关心"输出了什么"）。
 
 ---
 
@@ -1036,6 +1054,52 @@ UI / Application                   ProxyAssistantMessageEvent
                                      │ processProxyEvent 重建 partial
                                      ▼
                                    EventStream → Agent Loop → UI
+```
+
+### 课后练习
+
+**练习 1：修改 Demo 04-02 的流式输出**
+
+- **做什么**：在打字效果基础上加一个字符计数器，每 100 个字符打印一次 `[100 chars]`
+- **预期行为**：终端输出中穿插字符计数标记
+- **需要 API Key**：否
+
+```typescript
+// 提示：在 text_delta 事件处理中维护一个计数器
+let charCount = 0;
+
+for await (const event of stream) {
+  if (event.type === "text_delta") {
+    process.stdout.write(event.delta);
+    charCount += event.delta.length;
+    // TODO: 每 100 个字符打印一次标记
+    // 提示：用 Math.floor 判断是否跨越了 100 的倍数
+  }
+}
+```
+
+**练习 2：实现一个工具执行计时器**
+
+- **做什么**：只监听 `tool_execution_start` 和 `tool_execution_end` 事件，计算每个工具的执行耗时
+- **预期行为**：输出 `"tool read_file took 23ms, tool bash took 1502ms"`
+- **需要 API Key**：否
+
+```typescript
+// 提示：用 Map 记录每个 toolCallId 的开始时间
+const startTimes = new Map<string, number>();
+
+for await (const event of agentStream) {
+  if (event.type === "tool_execution_start") {
+    startTimes.set(event.toolCallId, Date.now());
+  }
+  if (event.type === "tool_execution_end") {
+    const start = startTimes.get(event.toolCallId);
+    if (start) {
+      const elapsed = Date.now() - start;
+      console.log(`tool ${event.toolName} took ${elapsed}ms`);
+    }
+  }
+}
 ```
 
 ### 下一章预告
