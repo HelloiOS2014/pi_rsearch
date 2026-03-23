@@ -80,7 +80,7 @@ function Panel({ config, accent, tag }: { config: CodePanelConfig; accent: strin
       </div>
 
       {/* Code */}
-      <div style={{ overflowX: 'auto', padding: '10px 0', fontFamily: "'JetBrains Mono', 'SF Mono', monospace", fontSize: '0.8125rem', lineHeight: 1.7 }}>
+      <div style={{ overflowX: 'auto', padding: '10px 0', fontFamily: "'JetBrains Mono', 'SF Mono', monospace", fontSize: '0.8125rem', lineHeight: 1.5 }}>
         <table style={{ borderCollapse: 'collapse', width: '100%' }}>
           <tbody>
             {lines.map((line, i) => (

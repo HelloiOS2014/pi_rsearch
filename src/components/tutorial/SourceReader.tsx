@@ -106,7 +106,7 @@ export default function SourceReader({
       overflow: 'hidden',
       fontFamily: "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace",
       fontSize: '0.8125rem',
-      lineHeight: 1.7,
+      lineHeight: 1.5,
     }}>
       {/* ── Header ── */}
       <div
