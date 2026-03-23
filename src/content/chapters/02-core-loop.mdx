@@ -100,6 +100,25 @@ import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 关键设计：`newMessages` 和 `currentContext.messages` 是两个独立的数组。`currentContext.messages` 包含完整的历史上下文（传给 LLM），`newMessages` 只包含本次新增的消息（返回给调用者）。两者的消息会同步 push，但 `newMessages` 不包含历史消息。
 
+### 从 30 行到 600 行：三个问题
+
+在看 `runLoop` 源码之前，先想想你在 Chapter 1 写的 30 行 Agent 会遇到什么问题：
+
+**问题 1：用户想中途插话。** Agent 正在执行第 3 轮工具调用，用户突然说"等等，先别删那个文件"。你的 while 循环没有检查点来接收这个消息。
+
+**问题 2：Agent 完成了，但用户想追问。** Agent 回答完毕退出了循环，但用户想说"再帮我检查一下测试"。你得重新调用 `prompt()`，但上下文已经丢了。
+
+**问题 3：出错了怎么办？** LLM 返回了格式错误的响应，或者工具执行超时了。你的 while 循环会崩溃。
+
+这就是 Pi 的 `runLoop` 要解决的三个核心问题。它的答案是：**双层循环 + Steering/Follow-up 队列**。
+
+先定义两个关键概念：
+
+- **Steering（中断注入）**：在工具执行间隙，把用户的新消息注入到下一轮 LLM 调用前。可以理解为 "interrupt" — Agent 还在跑，但你需要它听你一句新指令。
+- **Follow-up（续命）**：Agent 想停的时候，检查有没有追加消息，有的话继续执行。可以理解为 "keep going" — Agent 觉得自己做完了，但你还有新任务给它。
+
+带着这两个概念，来读 `runLoop` 的源码。
+
 ### runLoop：双层循环的核心
 
 这是整个 Pi 最关键的函数。30 行代码，双层 while 循环，实现了 Steering（中断注入）和 Follow-up（续命）两种机制：
@@ -252,7 +271,7 @@ import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 ### Steering vs Follow-up：两种"插话"机制
 
-理解这两种机制是理解 Pi Agent Loop 的关键：
+前面我们定义了 Steering（中断注入）和 Follow-up（续命）。现在对照源码，完整对比两种机制：
 
 | | Steering（中断） | Follow-up（续命） |
 |---|---|---|
@@ -793,6 +812,19 @@ Agent 工作中...
 
 重点：**abort 是协作式的**。Pi 不会强制 kill 正在执行的工具，而是把 AbortSignal 传递给工具，让工具自己决定如何处理。
 
+**AbortSignal 传播链**：从 `Agent.abort()` 开始，signal 沿着整个调用链逐层传递：
+
+```
+Agent.abort()
+  └→ AbortController.abort()
+       ├→ streamFn(signal) — LLM 流式调用检查 signal
+       ├→ beforeToolCall(ctx, signal) — 钩子检查 signal
+       ├→ tool.execute(id, args, signal) — 工具检查 signal
+       └→ afterToolCall(ctx, signal) — 钩子检查 signal
+```
+
+每一层都接收同一个 signal，任何一层都可以在检测到 `signal.aborted` 时提前退出。这就是 Web 标准 AbortController 的设计哲学 — 用一个 signal 串联所有异步操作，实现统一的取消语义。
+
 ### pendingToolCalls 每次创建新 Set
 
 ```typescript
@@ -1325,3 +1357,21 @@ LLM 偶尔会返回空的 `content` 数组。Pi 的 `runLoop` 通过检查 `tool
 4. **生产级框架的差距在边界处理** — 从 30 行 demo 到 Pi 的 1,427 行核心代码，增加的主要是：流式输出、两层转换管道、工具三阶段生命周期（prepare → execute → finalize）、响应式状态管理、以及大量的防御性错误处理。
 
 下一章，我们将深入 Pi 的工具系统 — 看看 `AgentTool` 的 TypeBox schema 验证、`beforeToolCall`/`afterToolCall` hooks、以及 coding agent 的 7 个内置工具是如何实现的。
+
+---
+
+## 动手练习
+
+**练习 1：把 steering 从 one-at-a-time 改为 all 模式**
+
+- 修改文件：`demos/02-mini-loop/src/04-steering.ts`
+- 做什么：当前 demo 的 `drainSteering` 一次性取出所有消息（类似 `all` 模式）。改为 `one-at-a-time` 模式 — 每次只取出队列中的第一条消息，剩余的留在队列等下一轮。然后对比两种模式的行为差异。
+- 预期行为：3 条 steering 消息在 `one-at-a-time` 模式下分 3 轮 LLM 调用逐条处理，而 `all` 模式下在 1 轮 LLM 调用中全部处理。
+- 需要 API Key：否（`MOCK=1` 模式可用）
+
+**练习 2：给 abort demo 加超时自动中止**
+
+- 修改文件：`demos/02-mini-loop/src/05-abort.ts`
+- 做什么：如果 LLM 调用超过 10 秒没有响应，自动触发 abort。提示：用 `setTimeout` 在 10 秒后调用 `controller.abort()`。
+- 预期行为：超时后 Agent 优雅退出，打印 "Timeout: auto-aborted after 10s"
+- 需要 API Key：否（mock 模式下可用 `setTimeout` 模拟延迟）
