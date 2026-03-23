@@ -22,14 +22,14 @@ const MOCK_RESPONSES = [
   3. LLM 根据结果回答: "这个CSV包含20条销售记录..."
 
 提示: 配置 ANTHROPIC_API_KEY 后可使用真实 LLM。
-提示: 直接测试工具逻辑: npx tsx -e "import {executeReadCsv} from './src/tools/read_csv.js'; executeReadCsv({path:'fixtures/data-analysis/sales.csv'}).then(console.log)"`,
+提示: 直接测试工具: npx tsx src/test-tool.ts`,
   `[Mock 模式] 模拟 Agent 执行流程:
   1. LLM 决定调用工具 list_files({directory: "."})
   2. 工具返回: ["src/", "fixtures/", "package.json", "tsconfig.json"]
   3. LLM 根据结果回答: "当前目录包含 4 个条目..."
 
 提示: 配置 ANTHROPIC_API_KEY 后可使用真实 LLM。
-提示: 直接测试工具逻辑: npx tsx -e "import {executeListFiles} from './src/tools/list_files.js'; executeListFiles({directory:'.'}).then(console.log)"`,
+提示: 直接测试工具: npx tsx src/test-tool.ts`,
 ];
 
 // ── REPL ─────────────────────────────────────────────────────

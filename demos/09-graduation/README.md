@@ -64,9 +64,11 @@ const TOOL_GUIDELINES = {
 ### 4. 直接测试工具（无需 API Key）
 
 ```bash
-# 在终端直接测试工具逻辑：
-npx tsx -e "import {executeReadCsv} from './src/tools/read_csv.js'; executeReadCsv({path:'fixtures/data-analysis/sales.csv'}).then(console.log)"
+cd demos/09-graduation
+npx tsx src/test-tool.ts
 ```
+
+测试脚本会调用 `read_csv` 工具并验证正常输出和错误处理。修改 `src/test-tool.ts` 来测试你自己的工具。
 
 > **创建你自己的工具**：复制 `src/tools/read_csv.ts`，修改 Schema 和 Execute 函数，然后在 `agent.ts` 中注册即可。
 
