@@ -8,33 +8,7 @@ import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
 import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
-# 流式与事件
-
-本章目标：深入理解 Pi 的流式事件系统 —— 从底层的 `EventStream` 推拉模型、13 种 `AssistantMessageEvent` 事件协议、12 种 `AgentEvent` 生命周期事件，到流式 JSON 增量解析和 Proxy 传输层的带宽优化。掌握这些后，你就理解了数据从 LLM 到 UI 的完整传输管道。
-
----
-
-## 4.1 EventStream 核心
-
-### 为什么需要 EventStream？
-
-想象 LLM 正在生成一个 500 字的回复。如果你等它全部生成完再显示，用户要盯着空白屏幕看 5 秒。如果你逐字符显示，用户看到打字效果，体验完全不同。
-
-但 LLM（生产者）和 UI（消费者）速度不同。LLM 可能一次输出 10 个 token，UI 可能还在渲染上一批。不协调就会：内存爆炸（生产者太快）或卡顿（消费者太慢）。
-
-EventStream 就是协调生产者和消费者的管道。
-
-### 问题：异步生产者与消费者如何协调？
-
-LLM 的流式响应是一个典型的 "生产者-消费者" 问题：LLM 以不可控的速率产出 token，UI 需要按自己的节奏消费。同时，使用者可能需要两种消费模式：逐事件处理（实时 UI 更新）或等待最终结果（获取完整消息）。
-
-Pi 通过 `EventStream<T, R>` 泛型类解决这个问题。`T` 是事件类型，`R` 是最终结果类型。
-
-### 源码解析
-
-<SourceReader
-  client:visible
-  code={`export class EventStream<T, R = T> implements AsyncIterable<T> {
+export const ch04Code1 = `export class EventStream<T, R = T> implements AsyncIterable<T> {
   private queue: T[] = [];
   private waiting: ((value: IteratorResult<T>) => void)[] = [];
   private done = false;
@@ -98,7 +72,323 @@ Pi 通过 `EventStream<T, R>` 泛型类解决这个问题。`T` 是事件类型�
   result(): Promise<R> {
     return this.finalResultPromise;
   }
-}`}
+}`;
+
+export const ch04Code2 = `export class AssistantMessageEventStream
+  extends EventStream<AssistantMessageEvent, AssistantMessage> {
+  constructor() {
+    super(
+      (event) => event.type === "done" || event.type === "error",
+      (event) => {
+        if (event.type === "done") {
+          return event.message;
+        } else if (event.type === "error") {
+          return event.error;
+        }
+        throw new Error("Unexpected event type for final result");
+      },
+    );
+  }
+}`;
+
+export const ch04Code3 = `export type AssistantMessageEvent =
+  | { type: "start"; partial: AssistantMessage }
+  | { type: "text_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
+  | { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
+  | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
+  | { type: "done"; reason: Extract<StopReason, "stop" | "length" | "toolUse">;
+      message: AssistantMessage }
+  | { type: "error"; reason: Extract<StopReason, "aborted" | "error">;
+      error: AssistantMessage };`;
+
+export const ch04Code4 = `export type AgentEvent =
+  // Agent lifecycle
+  | { type: "agent_start" }
+  | { type: "agent_end"; messages: AgentMessage[] }
+  // Turn lifecycle
+  | { type: "turn_start" }
+  | { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+  // Message lifecycle
+  | { type: "message_start"; message: AgentMessage }
+  | { type: "message_update"; message: AgentMessage;
+      assistantMessageEvent: AssistantMessageEvent }
+  | { type: "message_end"; message: AgentMessage }
+  // Tool execution lifecycle
+  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+  | { type: "tool_execution_update"; toolCallId: string; toolName: string;
+      args: any; partialResult: any }
+  | { type: "tool_execution_end"; toolCallId: string; toolName: string;
+      result: any; isError: boolean };`;
+
+export const ch04Code5 = `for await (const event of response) {
+  switch (event.type) {
+    case "start":
+      partialMessage = event.partial;
+      context.messages.push(partialMessage);
+      addedPartial = true;
+      await emit({ type: "message_start", message: { ...partialMessage } });
+      break;
+
+    case "text_start":
+    case "text_delta":
+    case "text_end":
+    case "thinking_start":
+    case "thinking_delta":
+    case "thinking_end":
+    case "toolcall_start":
+    case "toolcall_delta":
+    case "toolcall_end":
+      if (partialMessage) {
+        partialMessage = event.partial;
+        context.messages[context.messages.length - 1] = partialMessage;
+        await emit({
+          type: "message_update",
+          assistantMessageEvent: event,
+          message: { ...partialMessage },
+        });
+      }
+      break;
+
+    case "done":
+    case "error": {
+      const finalMessage = await response.result();
+      // ... update context and emit message_end
+      await emit({ type: "message_end", message: finalMessage });
+      return finalMessage;
+    }
+  }
+}`;
+
+export const ch04Code6 = `import { parse as partialParse } from "partial-json";
+
+export function parseStreamingJson<T = any>(partialJson: string | undefined): T {
+  if (!partialJson || partialJson.trim() === "") {
+    return {} as T;
+  }
+
+  // Try standard parsing first (fastest for complete JSON)
+  try {
+    return JSON.parse(partialJson) as T;
+  } catch {
+    // Try partial-json for incomplete JSON
+    try {
+      const result = partialParse(partialJson);
+      return (result ?? {}) as T;
+    } catch {
+      // If all parsing fails, return empty object
+      return {} as T;
+    }
+  }
+}`;
+
+export const ch04Code7 = `case "toolcall_delta": {
+  const content = partial.content[proxyEvent.contentIndex];
+  if (content?.type === "toolCall") {
+    (content as any).partialJson += proxyEvent.delta;
+    content.arguments = parseStreamingJson(
+      (content as any).partialJson
+    ) || {};
+    partial.content[proxyEvent.contentIndex] = { ...content };
+    return {
+      type: "toolcall_delta",
+      contentIndex: proxyEvent.contentIndex,
+      delta: proxyEvent.delta,
+      partial,
+    };
+  }
+  throw new Error("Received toolcall_delta for non-toolCall content");
+}`;
+
+export const ch04Code8 = `export type ProxyAssistantMessageEvent =
+  | { type: "start" }
+  | { type: "text_start"; contentIndex: number }
+  | { type: "text_delta"; contentIndex: number; delta: string }
+  | { type: "text_end"; contentIndex: number; contentSignature?: string }
+  | { type: "thinking_start"; contentIndex: number }
+  | { type: "thinking_delta"; contentIndex: number; delta: string }
+  | { type: "thinking_end"; contentIndex: number; contentSignature?: string }
+  | { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
+  | { type: "toolcall_delta"; contentIndex: number; delta: string }
+  | { type: "toolcall_end"; contentIndex: number }
+  | {
+      type: "done";
+      reason: Extract<StopReason, "stop" | "length" | "toolUse">;
+      usage: AssistantMessage["usage"];
+    }
+  | {
+      type: "error";
+      reason: Extract<StopReason, "aborted" | "error">;
+      errorMessage?: string;
+      usage: AssistantMessage["usage"];
+    };`;
+
+export const ch04Code9 = `function processProxyEvent(
+  proxyEvent: ProxyAssistantMessageEvent,
+  partial: AssistantMessage,
+): AssistantMessageEvent | undefined {
+  switch (proxyEvent.type) {
+    case "start":
+      return { type: "start", partial };
+
+    case "text_start":
+      partial.content[proxyEvent.contentIndex] = { type: "text", text: "" };
+      return { type: "text_start", contentIndex: proxyEvent.contentIndex, partial };
+
+    case "text_delta": {
+      const content = partial.content[proxyEvent.contentIndex];
+      if (content?.type === "text") {
+        content.text += proxyEvent.delta;
+        return {
+          type: "text_delta",
+          contentIndex: proxyEvent.contentIndex,
+          delta: proxyEvent.delta,
+          partial,
+        };
+      }
+      throw new Error("Received text_delta for non-text content");
+    }
+
+    case "text_end": {
+      const content = partial.content[proxyEvent.contentIndex];
+      if (content?.type === "text") {
+        content.textSignature = proxyEvent.contentSignature;
+        return {
+          type: "text_end",
+          contentIndex: proxyEvent.contentIndex,
+          content: content.text,
+          partial,
+        };
+      }
+      throw new Error("Received text_end for non-text content");
+    }
+    // ... thinking 和 toolcall 类似处理
+  }
+}`;
+
+export const ch04Code10 = `reader = response.body!.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() || "";
+
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const data = line.slice(6).trim();
+      if (data) {
+        const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
+        const event = processProxyEvent(proxyEvent, partial);
+        if (event) {
+          stream.push(event);
+        }
+      }
+    }
+  }
+}`;
+
+export const ch04Code11 = `class EventStream<T, R = T> implements AsyncIterable<T> {
+  private queue: T[] = [];
+  private waiting: ((value: IteratorResult<T>) => void)[] = [];
+  private done = false;
+  private finalResultPromise: Promise<R>;
+  private resolveFinalResult!: (result: R) => void;
+
+  constructor(
+    private isComplete: (event: T) => boolean,
+    private extractResult: (event: T) => R,
+  ) {
+    this.finalResultPromise = new Promise((resolve) => {
+      this.resolveFinalResult = resolve;
+    });
+  }
+
+  push(event: T): void {
+    if (this.done) return;
+    if (this.isComplete(event)) {
+      this.done = true;
+      this.resolveFinalResult(this.extractResult(event));
+    }
+    const waiter = this.waiting.shift();
+    if (waiter) {
+      waiter({ value: event, done: false });
+    } else {
+      this.queue.push(event);
+    }
+  }
+}`;
+
+export const ch04Code12 = `class EventStream<T, R> implements AsyncIterable<T> {
+  private queue: T[] = [];
+  private waiter: ((value: IteratorResult<T>) => void) | null = null;
+  private done = false;
+  private resultPromise: Promise<R>;
+  private resolveResult!: (value: R) => void;
+  private isCompletePredicate: (event: T) => boolean;
+
+  constructor(isComplete: (event: T) => boolean) {
+    this.isCompletePredicate = isComplete;
+    this.resultPromise = new Promise<R>((resolve) => {
+      this.resolveResult = resolve;
+    });
+  }
+
+  push(event: T): void {
+    if (this.done) return;
+    if (this.isCompletePredicate(event)) {
+      this.done = true;
+      if (this.waiter) {
+        this.waiter({ value: undefined as any, done: true });
+        this.waiter = null;
+      }
+      return;
+    }
+    if (this.waiter) {
+      this.waiter({ value: event, done: false });
+      this.waiter = null;
+    } else {
+      this.queue.push(event);
+    }
+  }
+}`;
+
+# 流式与事件
+
+本章目标：深入理解 Pi 的流式事件系统 —— 从底层的 `EventStream` 推拉模型、13 种 `AssistantMessageEvent` 事件协议、12 种 `AgentEvent` 生命周期事件，到流式 JSON 增量解析和 Proxy 传输层的带宽优化。掌握这些后，你就理解了数据从 LLM 到 UI 的完整传输管道。
+
+---
+
+## 4.1 EventStream 核心
+
+### 为什么需要 EventStream？
+
+想象 LLM 正在生成一个 500 字的回复。如果你等它全部生成完再显示，用户要盯着空白屏幕看 5 秒。如果你逐字符显示，用户看到打字效果，体验完全不同。
+
+但 LLM（生产者）和 UI（消费者）速度不同。LLM 可能一次输出 10 个 token，UI 可能还在渲染上一批。不协调就会：内存爆炸（生产者太快）或卡顿（消费者太慢）。
+
+EventStream 就是协调生产者和消费者的管道。
+
+### 问题：异步生产者与消费者如何协调？
+
+LLM 的流式响应是一个典型的 "生产者-消费者" 问题：LLM 以不可控的速率产出 token，UI 需要按自己的节奏消费。同时，使用者可能需要两种消费模式：逐事件处理（实时 UI 更新）或等待最终结果（获取完整消息）。
+
+Pi 通过 `EventStream<T, R>` 泛型类解决这个问题。`T` 是事件类型，`R` 是最终结果类型。
+
+### 源码解析
+
+<SourceReader
+  client:visible
+  code={ch04Code1}
   filename="packages/ai/src/utils/event-stream.ts"
   language="typescript"
   startLine={4}
@@ -171,22 +461,7 @@ console.log(finalMessage.content);
 
 <SourceReader
   client:visible
-  code={`export class AssistantMessageEventStream
-  extends EventStream<AssistantMessageEvent, AssistantMessage> {
-  constructor() {
-    super(
-      (event) => event.type === "done" || event.type === "error",
-      (event) => {
-        if (event.type === "done") {
-          return event.message;
-        } else if (event.type === "error") {
-          return event.error;
-        }
-        throw new Error("Unexpected event type for final result");
-      },
-    );
-  }
-}`}
+  code={ch04Code2}
   filename="packages/ai/src/utils/event-stream.ts"
   language="typescript"
   startLine={68}
@@ -210,21 +485,7 @@ console.log(finalMessage.content);
 
 <SourceReader
   client:visible
-  code={`export type AssistantMessageEvent =
-  | { type: "start"; partial: AssistantMessage }
-  | { type: "text_start"; contentIndex: number; partial: AssistantMessage }
-  | { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-  | { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
-  | { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
-  | { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-  | { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
-  | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
-  | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-  | { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
-  | { type: "done"; reason: Extract<StopReason, "stop" | "length" | "toolUse">;
-      message: AssistantMessage }
-  | { type: "error"; reason: Extract<StopReason, "aborted" | "error">;
-      error: AssistantMessage };`}
+  code={ch04Code3}
   filename="packages/ai/src/types.ts"
   language="typescript"
   startLine={237}
@@ -334,24 +595,7 @@ AgentEvent（12 种）是应用层的生命周期事件 — 标记一轮对话�
 
 <SourceReader
   client:visible
-  code={`export type AgentEvent =
-  // Agent lifecycle
-  | { type: "agent_start" }
-  | { type: "agent_end"; messages: AgentMessage[] }
-  // Turn lifecycle
-  | { type: "turn_start" }
-  | { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
-  // Message lifecycle
-  | { type: "message_start"; message: AgentMessage }
-  | { type: "message_update"; message: AgentMessage;
-      assistantMessageEvent: AssistantMessageEvent }
-  | { type: "message_end"; message: AgentMessage }
-  // Tool execution lifecycle
-  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
-  | { type: "tool_execution_update"; toolCallId: string; toolName: string;
-      args: any; partialResult: any }
-  | { type: "tool_execution_end"; toolCallId: string; toolName: string;
-      result: any; isError: boolean };`}
+  code={ch04Code4}
   filename="packages/agent/src/types.ts"
   language="typescript"
   startLine={295}
@@ -460,44 +704,7 @@ agent-loop 中的桥接代码非常直接：
 
 <SourceReader
   client:visible
-  code={`for await (const event of response) {
-  switch (event.type) {
-    case "start":
-      partialMessage = event.partial;
-      context.messages.push(partialMessage);
-      addedPartial = true;
-      await emit({ type: "message_start", message: { ...partialMessage } });
-      break;
-
-    case "text_start":
-    case "text_delta":
-    case "text_end":
-    case "thinking_start":
-    case "thinking_delta":
-    case "thinking_end":
-    case "toolcall_start":
-    case "toolcall_delta":
-    case "toolcall_end":
-      if (partialMessage) {
-        partialMessage = event.partial;
-        context.messages[context.messages.length - 1] = partialMessage;
-        await emit({
-          type: "message_update",
-          assistantMessageEvent: event,
-          message: { ...partialMessage },
-        });
-      }
-      break;
-
-    case "done":
-    case "error": {
-      const finalMessage = await response.result();
-      // ... update context and emit message_end
-      await emit({ type: "message_end", message: finalMessage });
-      return finalMessage;
-    }
-  }
-}`}
+  code={ch04Code5}
   filename="packages/agent/src/agent-loop.ts"
   language="typescript"
   startLine={276}
@@ -568,27 +775,7 @@ toolcall_delta: ', "max_results": 5}'
 
 <SourceReader
   client:visible
-  code={`import { parse as partialParse } from "partial-json";
-
-export function parseStreamingJson<T = any>(partialJson: string | undefined): T {
-  if (!partialJson || partialJson.trim() === "") {
-    return {} as T;
-  }
-
-  // Try standard parsing first (fastest for complete JSON)
-  try {
-    return JSON.parse(partialJson) as T;
-  } catch {
-    // Try partial-json for incomplete JSON
-    try {
-      const result = partialParse(partialJson);
-      return (result ?? {}) as T;
-    } catch {
-      // If all parsing fails, return empty object
-      return {} as T;
-    }
-  }
-}`}
+  code={ch04Code6}
   filename="packages/ai/src/utils/json-parse.ts"
   language="typescript"
   startLine={1}
@@ -616,23 +803,7 @@ export function parseStreamingJson<T = any>(partialJson: string | undefined): T 
 
 <SourceReader
   client:visible
-  code={`case "toolcall_delta": {
-  const content = partial.content[proxyEvent.contentIndex];
-  if (content?.type === "toolCall") {
-    (content as any).partialJson += proxyEvent.delta;
-    content.arguments = parseStreamingJson(
-      (content as any).partialJson
-    ) || {};
-    partial.content[proxyEvent.contentIndex] = { ...content };
-    return {
-      type: "toolcall_delta",
-      contentIndex: proxyEvent.contentIndex,
-      delta: proxyEvent.delta,
-      partial,
-    };
-  }
-  throw new Error("Received toolcall_delta for non-toolCall content");
-}`}
+  code={ch04Code7}
   filename="packages/agent/src/proxy.ts"
   language="typescript"
   startLine={293}
@@ -676,28 +847,7 @@ Proxy 的核心优化是 **剥离 partial 字段**。原始 `AssistantMessageEve
 
 <SourceReader
   client:visible
-  code={`export type ProxyAssistantMessageEvent =
-  | { type: "start" }
-  | { type: "text_start"; contentIndex: number }
-  | { type: "text_delta"; contentIndex: number; delta: string }
-  | { type: "text_end"; contentIndex: number; contentSignature?: string }
-  | { type: "thinking_start"; contentIndex: number }
-  | { type: "thinking_delta"; contentIndex: number; delta: string }
-  | { type: "thinking_end"; contentIndex: number; contentSignature?: string }
-  | { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
-  | { type: "toolcall_delta"; contentIndex: number; delta: string }
-  | { type: "toolcall_end"; contentIndex: number }
-  | {
-      type: "done";
-      reason: Extract<StopReason, "stop" | "length" | "toolUse">;
-      usage: AssistantMessage["usage"];
-    }
-  | {
-      type: "error";
-      reason: Extract<StopReason, "aborted" | "error">;
-      errorMessage?: string;
-      usage: AssistantMessage["usage"];
-    };`}
+  code={ch04Code8}
   filename="packages/agent/src/proxy.ts"
   language="typescript"
   startLine={36}
@@ -748,48 +898,7 @@ ProxyAssistantMessageEvent (精简):
 
 <SourceReader
   client:visible
-  code={`function processProxyEvent(
-  proxyEvent: ProxyAssistantMessageEvent,
-  partial: AssistantMessage,
-): AssistantMessageEvent | undefined {
-  switch (proxyEvent.type) {
-    case "start":
-      return { type: "start", partial };
-
-    case "text_start":
-      partial.content[proxyEvent.contentIndex] = { type: "text", text: "" };
-      return { type: "text_start", contentIndex: proxyEvent.contentIndex, partial };
-
-    case "text_delta": {
-      const content = partial.content[proxyEvent.contentIndex];
-      if (content?.type === "text") {
-        content.text += proxyEvent.delta;
-        return {
-          type: "text_delta",
-          contentIndex: proxyEvent.contentIndex,
-          delta: proxyEvent.delta,
-          partial,
-        };
-      }
-      throw new Error("Received text_delta for non-text content");
-    }
-
-    case "text_end": {
-      const content = partial.content[proxyEvent.contentIndex];
-      if (content?.type === "text") {
-        content.textSignature = proxyEvent.contentSignature;
-        return {
-          type: "text_end",
-          contentIndex: proxyEvent.contentIndex,
-          content: content.text,
-          partial,
-        };
-      }
-      throw new Error("Received text_end for non-text content");
-    }
-    // ... thinking 和 toolcall 类似处理
-  }
-}`}
+  code={ch04Code9}
   filename="packages/agent/src/proxy.ts"
   language="typescript"
   startLine={211}
@@ -822,31 +931,7 @@ data: {"type":"done","reason":"stop","usage":{"input":10,"output":5,...}}
 
 <SourceReader
   client:visible
-  code={`reader = response.body!.getReader();
-const decoder = new TextDecoder();
-let buffer = "";
-
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-
-  buffer += decoder.decode(value, { stream: true });
-  const lines = buffer.split("\\n");
-  buffer = lines.pop() || "";
-
-  for (const line of lines) {
-    if (line.startsWith("data: ")) {
-      const data = line.slice(6).trim();
-      if (data) {
-        const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
-        const event = processProxyEvent(proxyEvent, partial);
-        if (event) {
-          stream.push(event);
-        }
-      }
-    }
-  }
-}`}
+  code={ch04Code10}
   filename="packages/agent/src/proxy.ts"
   language="typescript"
   startLine={152}
@@ -910,74 +995,13 @@ const agent = new Agent({
   title="EventStream：Pi 实现 vs Demo 简化版"
   left={{
     title: "Pi 源码",
-    code: `class EventStream<T, R = T> implements AsyncIterable<T> {
-  private queue: T[] = [];
-  private waiting: ((value: IteratorResult<T>) => void)[] = [];
-  private done = false;
-  private finalResultPromise: Promise<R>;
-  private resolveFinalResult!: (result: R) => void;
-
-  constructor(
-    private isComplete: (event: T) => boolean,
-    private extractResult: (event: T) => R,
-  ) {
-    this.finalResultPromise = new Promise((resolve) => {
-      this.resolveFinalResult = resolve;
-    });
-  }
-
-  push(event: T): void {
-    if (this.done) return;
-    if (this.isComplete(event)) {
-      this.done = true;
-      this.resolveFinalResult(this.extractResult(event));
-    }
-    const waiter = this.waiting.shift();
-    if (waiter) {
-      waiter({ value: event, done: false });
-    } else {
-      this.queue.push(event);
-    }
-  }
-}`,
+    code: ch04Code11,
     language: "typescript",
     filename: "packages/ai/src/utils/event-stream.ts"
   }}
   right={{
     title: "Demo 简化版",
-    code: `class EventStream<T, R> implements AsyncIterable<T> {
-  private queue: T[] = [];
-  private waiter: ((value: IteratorResult<T>) => void) | null = null;
-  private done = false;
-  private resultPromise: Promise<R>;
-  private resolveResult!: (value: R) => void;
-  private isCompletePredicate: (event: T) => boolean;
-
-  constructor(isComplete: (event: T) => boolean) {
-    this.isCompletePredicate = isComplete;
-    this.resultPromise = new Promise<R>((resolve) => {
-      this.resolveResult = resolve;
-    });
-  }
-
-  push(event: T): void {
-    if (this.done) return;
-    if (this.isCompletePredicate(event)) {
-      this.done = true;
-      if (this.waiter) {
-        this.waiter({ value: undefined as any, done: true });
-        this.waiter = null;
-      }
-      return;
-    }
-    if (this.waiter) {
-      this.waiter({ value: event, done: false });
-      this.waiter = null;
-    } else {
-      this.queue.push(event);
-    }
-  }
-}`,
+    code: ch04Code12,
     language: "typescript",
     filename: "demos/04-streaming/src/01-event-stream.ts"
   }}

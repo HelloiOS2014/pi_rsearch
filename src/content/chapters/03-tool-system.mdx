@@ -8,6 +8,468 @@ import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
 import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
+export const ch03Code1 = `// AgentTool extends Tool but adds the execute function
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
+  // A human-readable label for the tool to be displayed in UI
+  label: string;
+  execute: (
+    toolCallId: string,
+    params: Static<TParameters>,
+    signal?: AbortSignal,
+    onUpdate?: AgentToolUpdateCallback<TDetails>,
+  ) => Promise<AgentToolResult<TDetails>>;
+}`;
+
+export const ch03Code2 = `export interface AgentToolResult<T> {
+  // Content blocks supporting text and images
+  content: (TextContent | ImageContent)[];
+  // Details to be displayed in a UI or logged
+  details: T;
+}
+
+// Callback for streaming tool execution updates
+export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;`;
+
+export const ch03Code3 = `// Create a singleton AJV instance with formats
+const ajv = new Ajv({
+  allErrors: true,   // 收集所有错误，而非在第一个错误时停止
+  strict: false,     // 允许 TypeBox 的扩展关键字（如 description）
+  coerceTypes: true,  // "42" → 42 自动类型转换
+});
+addFormats(ajv);
+
+export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
+  // Compile the schema.
+  const validate = ajv.compile(tool.parameters);
+
+  // Clone arguments so AJV can safely mutate for type coercion
+  const args = structuredClone(toolCall.arguments);
+
+  // Validate the arguments (AJV mutates args in-place for type coercion)
+  if (validate(args)) {
+    return args;
+  }
+
+  // Format validation errors nicely
+  const errors = validate.errors
+    ?.map((err: any) => {
+      const path = err.instancePath
+        ? err.instancePath.substring(1)
+        : err.params.missingProperty || "root";
+      return \`  - \${path}: \${err.message}\`;
+    })
+    .join("\\n") || "Unknown validation error";
+
+  throw new Error(
+    \`Validation failed for tool "\${toolCall.name}":\\n\${errors}\`
+  );
+}`;
+
+export const ch03Code4 = `const bashSchema = Type.Object({
+  command: Type.String({ description: "Bash command to execute" }),
+  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+});
+
+export interface BashToolDetails {
+  truncation?: TruncationResult;
+  fullOutputPath?: string;
+}
+
+export interface BashOperations {
+  exec: (
+    command: string,
+    cwd: string,
+    options: {
+      onData: (data: Buffer) => void;
+      signal?: AbortSignal;
+      timeout?: number;
+      env?: NodeJS.ProcessEnv;
+    },
+  ) => Promise<{ exitCode: number | null }>;
+}`;
+
+export const ch03Code5 = `// 截断限制
+export const DEFAULT_MAX_LINES = 2000;
+export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
+
+// Bash 工具的输出处理
+const chunks: Buffer[] = [];
+let chunksBytes = 0;
+const maxChunksBytes = DEFAULT_MAX_BYTES * 2;  // 保留 2 倍，确保截断有足够素材
+
+const handleData = (data: Buffer) => {
+  totalBytes += data.length;
+
+  // 超过 50KB 时开始写入临时文件
+  if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
+    tempFilePath = getTempFilePath();
+    tempFileStream = createWriteStream(tempFilePath);
+    for (const chunk of chunks) {
+      tempFileStream.write(chunk);
+    }
+  }
+
+  // 写入临时文件
+  if (tempFileStream) {
+    tempFileStream.write(data);
+  }
+
+  // 维护滚动缓冲区
+  chunks.push(data);
+  chunksBytes += data.length;
+
+  // 淘汰旧的 chunk
+  while (chunksBytes > maxChunksBytes && chunks.length > 1) {
+    const removed = chunks.shift()!;
+    chunksBytes -= removed.length;
+  }
+};`;
+
+export const ch03Code6 = `export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
+  // Try exact match first
+  const exactIndex = content.indexOf(oldText);
+  if (exactIndex !== -1) {
+    return {
+      found: true,
+      index: exactIndex,
+      matchLength: oldText.length,
+      usedFuzzyMatch: false,
+      contentForReplacement: content,
+    };
+  }
+
+  // Try fuzzy match - work entirely in normalized space
+  const fuzzyContent = normalizeForFuzzyMatch(content);
+  const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+  const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
+
+  if (fuzzyIndex === -1) {
+    return { found: false, index: -1, matchLength: 0,
+             usedFuzzyMatch: false, contentForReplacement: content };
+  }
+
+  // When fuzzy matching, we work in the normalized space for replacement
+  return {
+    found: true,
+    index: fuzzyIndex,
+    matchLength: fuzzyOldText.length,
+    usedFuzzyMatch: true,
+    contentForReplacement: fuzzyContent,
+  };
+}`;
+
+export const ch03Code7 = `export function normalizeForFuzzyMatch(text: string): string {
+  return (
+    text
+      .normalize("NFKC")
+      // 1. Strip trailing whitespace per line
+      .split("\\n")
+      .map((line) => line.trimEnd())
+      .join("\\n")
+      // 2. Smart single quotes → '
+      .replace(/[\\u2018\\u2019\\u201A\\u201B]/g, "'")
+      // 3. Smart double quotes → "
+      .replace(/[\\u201C\\u201D\\u201E\\u201F]/g, '"')
+      // 4. Various dashes/hyphens → -
+      .replace(/[\\u2010\\u2011\\u2012\\u2013\\u2014\\u2015\\u2212]/g, "-")
+      // 5. Special spaces → regular space
+      .replace(/[\\u00A0\\u2002-\\u200A\\u202F\\u205F\\u3000]/g, " ")
+  );
+}`;
+
+export const ch03Code14 = `export interface BashOperations {
+  exec: (
+    command: string,
+    cwd: string,
+    options: {
+      onData: (data: Buffer) => void;
+      signal?: AbortSignal;
+      timeout?: number;
+      env?: NodeJS.ProcessEnv;
+    },
+  ) => Promise<{ exitCode: number | null }>;
+}
+
+// 使用时传入自定义实现
+createBashTool(cwd, {
+  operations: myRemoteBashOps
+});`;
+
+export const ch03Code15 = `export interface EditOperations {
+  readFile: (path: string) => Promise<Buffer>;
+  writeFile: (path: string, content: string)
+    => Promise<void>;
+  access: (path: string) => Promise<void>;
+}
+
+// 默认实现：本地文件系统
+const defaultEditOperations = {
+  readFile: (p) => fsReadFile(p),
+  writeFile: (p, c) => fsWriteFile(p, c, "utf-8"),
+  access: (p) => fsAccess(p, R_OK | W_OK),
+};`;
+
+export const ch03Code8 = `const fileMutationQueues = new Map<string, Promise<void>>();
+
+async function getMutationQueueKey(filePath: string): Promise<string> {
+  const resolvedPath = resolve(filePath);
+  try {
+    return await realpath(resolvedPath);  // 解析符号链接
+  } catch {
+    return resolvedPath;
+  }
+}
+
+export async function withFileMutationQueue<T>(
+  filePath: string, fn: () => Promise<T>
+): Promise<T> {
+  const key = await getMutationQueueKey(filePath);
+  const currentQueue = fileMutationQueues.get(key) ?? Promise.resolve();
+
+  let releaseNext!: () => void;
+  const nextQueue = new Promise<void>((resolveQueue) => {
+    releaseNext = resolveQueue;
+  });
+  const chainedQueue = currentQueue.then(() => nextQueue);
+  fileMutationQueues.set(key, chainedQueue);
+
+  await currentQueue;
+  try {
+    return await fn();
+  } finally {
+    releaseNext();
+    if (fileMutationQueues.get(key) === chainedQueue) {
+      fileMutationQueues.delete(key);
+    }
+  }
+}`;
+
+export const ch03Code9 = `async function executeToolCallsParallel(
+  currentContext: AgentContext,
+  assistantMessage: AssistantMessage,
+  toolCalls: AgentToolCall[],
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+): Promise<ToolResultMessage[]> {
+  const results: ToolResultMessage[] = [];
+  const runnableCalls: PreparedToolCall[] = [];
+
+  // Phase 1: 顺序 prepare
+  for (const toolCall of toolCalls) {
+    await emit({
+      type: "tool_execution_start",
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      args: toolCall.arguments,
+    });
+
+    const preparation = await prepareToolCall(
+      currentContext, assistantMessage, toolCall, config, signal
+    );
+    if (preparation.kind === "immediate") {
+      results.push(await emitToolCallOutcome(
+        toolCall, preparation.result, preparation.isError, emit
+      ));
+    } else {
+      runnableCalls.push(preparation);
+    }
+  }
+
+  // Phase 2: 并发 execute — 关键：.map() 启动所有 Promise
+  const runningCalls = runnableCalls.map((prepared) => ({
+    prepared,
+    execution: executePreparedToolCall(prepared, signal, emit),
+  }));
+
+  // Phase 3: 按源序 finalize — 关键：for...of 按顺序 await
+  for (const running of runningCalls) {
+    const executed = await running.execution;
+    results.push(
+      await finalizeExecutedToolCall(
+        currentContext, assistantMessage,
+        running.prepared, executed, config, signal, emit,
+      ),
+    );
+  }
+
+  return results;
+}`;
+
+export const ch03Code10 = `async function prepareToolCall(
+  currentContext: AgentContext,
+  assistantMessage: AssistantMessage,
+  toolCall: AgentToolCall,
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+  // 1. 查找工具
+  const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
+  if (!tool) {
+    return {
+      kind: "immediate",
+      result: createErrorToolResult(\`Tool \${toolCall.name} not found\`),
+      isError: true,
+    };
+  }
+
+  try {
+    // 2. 验证参数
+    const validatedArgs = validateToolArguments(tool, toolCall);
+
+    // 3. beforeToolCall 钩子
+    if (config.beforeToolCall) {
+      const beforeResult = await config.beforeToolCall(
+        { assistantMessage, toolCall, args: validatedArgs, context: currentContext },
+        signal,
+      );
+      if (beforeResult?.block) {
+        return {
+          kind: "immediate",
+          result: createErrorToolResult(
+            beforeResult.reason || "Tool execution was blocked"
+          ),
+          isError: true,
+        };
+      }
+    }
+    return { kind: "prepared", toolCall, tool, args: validatedArgs };
+  } catch (error) {
+    return {
+      kind: "immediate",
+      result: createErrorToolResult(
+        error instanceof Error ? error.message : String(error)
+      ),
+      isError: true,
+    };
+  }
+}`;
+
+export const ch03Code11 = `async function executePreparedToolCall(
+  prepared: PreparedToolCall,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+): Promise<ExecutedToolCallOutcome> {
+  const updateEvents: Promise<void>[] = [];
+
+  try {
+    const result = await prepared.tool.execute(
+      prepared.toolCall.id,
+      prepared.args as never,
+      signal,
+      (partialResult) => {
+        updateEvents.push(
+          Promise.resolve(
+            emit({
+              type: "tool_execution_update",
+              toolCallId: prepared.toolCall.id,
+              toolName: prepared.toolCall.name,
+              args: prepared.toolCall.arguments,
+              partialResult,
+            }),
+          ),
+        );
+      },
+    );
+    await Promise.all(updateEvents);  // 确保所有进度事件发出
+    return { result, isError: false };
+  } catch (error) {
+    await Promise.all(updateEvents);  // 即使失败也要等进度事件发完
+    return {
+      result: createErrorToolResult(
+        error instanceof Error ? error.message : String(error)
+      ),
+      isError: true,
+    };
+  }
+}`;
+
+export const ch03Code12 = `export interface AfterToolCallResult {
+  content?: (TextContent | ImageContent)[];
+  details?: unknown;
+  isError?: boolean;
+}
+
+// finalizeExecutedToolCall 中的合并逻辑
+if (config.afterToolCall) {
+  const afterResult = await config.afterToolCall(
+    { assistantMessage, toolCall: prepared.toolCall,
+      args: prepared.args, result, isError, context: currentContext },
+    signal,
+  );
+  if (afterResult) {
+    result = {
+      content: afterResult.content ?? result.content,   // 有则替换，无则保留
+      details: afterResult.details ?? result.details,
+    };
+    isError = afterResult.isError ?? isError;            // 可独立翻转错误标志
+  }
+}`;
+
+export const ch03Code13 = `export type ToolExecutionMode = "sequential" | "parallel";
+
+async function executeToolCalls(
+  currentContext: AgentContext,
+  assistantMessage: AssistantMessage,
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+  emit: AgentEventSink,
+): Promise<ToolResultMessage[]> {
+  const toolCalls = assistantMessage.content.filter(
+    (c) => c.type === "toolCall"
+  );
+  if (config.toolExecution === "sequential") {
+    return executeToolCallsSequential(
+      currentContext, assistantMessage, toolCalls, config, signal, emit
+    );
+  }
+  return executeToolCallsParallel(
+    currentContext, assistantMessage, toolCalls, config, signal, emit
+  );
+}`;
+
+export const ch03Code16 = `// Pi: 完整的工具定义
+interface AgentTool<TParams, TDetails> {
+  name: string;
+  label: string;         // UI 显示名
+  description: string;   // LLM 看的说明
+  parameters: TParams;   // TypeBox Schema
+
+  execute: (
+    toolCallId: string,
+    params: Static<TParams>,
+    signal?: AbortSignal,
+    onUpdate?: AgentToolUpdateCallback,
+  ) => Promise<AgentToolResult<TDetails>>;
+}
+
+// 返回值分离 content 和 details
+interface AgentToolResult<T> {
+  content: (TextContent | ImageContent)[];
+  details: T;  // UI-only metadata
+}`;
+
+export const ch03Code17 = `// 简化：去掉 UI 相关的复杂度
+interface SimpleTool {
+  name: string;
+  description: string;
+  parameters: TSchema;
+
+  execute: (
+    params: Record<string, unknown>,
+  ) => Promise<string>;
+}
+
+// 返回值就是一个字符串
+// 没有 content/details 分离
+// 没有 signal（不支持取消）
+// 没有 onUpdate（不支持进度）
+// 没有 toolCallId（不需要关联）
+
+
+
+`;
+
 # 工具系统
 
 本章目标：深入理解 Pi 工具系统的完整生命周期 —— 从 TypeBox Schema 定义、AJV 验证、并行/顺序执行，到 before/after 钩子系统。掌握工具系统后，你就理解了 Agent 与外部世界交互的全部机制。
@@ -22,17 +484,7 @@ import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
 <SourceReader
   client:visible
-  code={`// AgentTool extends Tool but adds the execute function
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
-  // A human-readable label for the tool to be displayed in UI
-  label: string;
-  execute: (
-    toolCallId: string,
-    params: Static<TParameters>,
-    signal?: AbortSignal,
-    onUpdate?: AgentToolUpdateCallback<TDetails>,
-  ) => Promise<AgentToolResult<TDetails>>;
-}`}
+  code={ch03Code1}
   filename="packages/agent/src/types.ts"
   language="typescript"
   startLine={272}
@@ -62,15 +514,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 
 <SourceReader
   client:visible
-  code={`export interface AgentToolResult<T> {
-  // Content blocks supporting text and images
-  content: (TextContent | ImageContent)[];
-  // Details to be displayed in a UI or logged
-  details: T;
-}
-
-// Callback for streaming tool execution updates
-export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;`}
+  code={ch03Code2}
   filename="packages/agent/src/types.ts"
   language="typescript"
   startLine={262}
@@ -124,40 +568,7 @@ LLM 返回的参数是 JSON，可能存在类型错误。Pi 使用 AJV 进行运
 
 <SourceReader
   client:visible
-  code={`// Create a singleton AJV instance with formats
-const ajv = new Ajv({
-  allErrors: true,   // 收集所有错误，而非在第一个错误时停止
-  strict: false,     // 允许 TypeBox 的扩展关键字（如 description）
-  coerceTypes: true,  // "42" → 42 自动类型转换
-});
-addFormats(ajv);
-
-export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
-  // Compile the schema.
-  const validate = ajv.compile(tool.parameters);
-
-  // Clone arguments so AJV can safely mutate for type coercion
-  const args = structuredClone(toolCall.arguments);
-
-  // Validate the arguments (AJV mutates args in-place for type coercion)
-  if (validate(args)) {
-    return args;
-  }
-
-  // Format validation errors nicely
-  const errors = validate.errors
-    ?.map((err: any) => {
-      const path = err.instancePath
-        ? err.instancePath.substring(1)
-        : err.params.missingProperty || "root";
-      return \`  - \${path}: \${err.message}\`;
-    })
-    .join("\\n") || "Unknown validation error";
-
-  throw new Error(
-    \`Validation failed for tool "\${toolCall.name}":\\n\${errors}\`
-  );
-}`}
+  code={ch03Code3}
   filename="packages/ai/src/utils/validation.ts"
   language="typescript"
   highlights={[
@@ -199,28 +610,7 @@ Bash 工具看似简单（执行一条命令），实际需要处理大量边界
 
 <SourceReader
   client:visible
-  code={`const bashSchema = Type.Object({
-  command: Type.String({ description: "Bash command to execute" }),
-  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
-});
-
-export interface BashToolDetails {
-  truncation?: TruncationResult;
-  fullOutputPath?: string;
-}
-
-export interface BashOperations {
-  exec: (
-    command: string,
-    cwd: string,
-    options: {
-      onData: (data: Buffer) => void;
-      signal?: AbortSignal;
-      timeout?: number;
-      env?: NodeJS.ProcessEnv;
-    },
-  ) => Promise<{ exitCode: number | null }>;
-}`}
+  code={ch03Code4}
   filename="packages/coding-agent/src/core/tools/bash.ts"
   language="typescript"
   startLine={20}
@@ -256,42 +646,7 @@ const onAbort = () => {
 
 <SourceReader
   client:visible
-  code={`// 截断限制
-export const DEFAULT_MAX_LINES = 2000;
-export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
-
-// Bash 工具的输出处理
-const chunks: Buffer[] = [];
-let chunksBytes = 0;
-const maxChunksBytes = DEFAULT_MAX_BYTES * 2;  // 保留 2 倍，确保截断有足够素材
-
-const handleData = (data: Buffer) => {
-  totalBytes += data.length;
-
-  // 超过 50KB 时开始写入临时文件
-  if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
-    tempFilePath = getTempFilePath();
-    tempFileStream = createWriteStream(tempFilePath);
-    for (const chunk of chunks) {
-      tempFileStream.write(chunk);
-    }
-  }
-
-  // 写入临时文件
-  if (tempFileStream) {
-    tempFileStream.write(data);
-  }
-
-  // 维护滚动缓冲区
-  chunks.push(data);
-  chunksBytes += data.length;
-
-  // 淘汰旧的 chunk
-  while (chunksBytes > maxChunksBytes && chunks.length > 1) {
-    const removed = chunks.shift()!;
-    chunksBytes -= removed.length;
-  }
-};`}
+  code={ch03Code5}
   filename="packages/coding-agent/src/core/tools/bash.ts"
   language="typescript"
   highlights={[
@@ -311,38 +666,7 @@ Edit 工具是 coding agent 的核心 —— 精确修改文件内容。挑战�
 
 <SourceReader
   client:visible
-  code={`export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
-  // Try exact match first
-  const exactIndex = content.indexOf(oldText);
-  if (exactIndex !== -1) {
-    return {
-      found: true,
-      index: exactIndex,
-      matchLength: oldText.length,
-      usedFuzzyMatch: false,
-      contentForReplacement: content,
-    };
-  }
-
-  // Try fuzzy match - work entirely in normalized space
-  const fuzzyContent = normalizeForFuzzyMatch(content);
-  const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-  const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
-
-  if (fuzzyIndex === -1) {
-    return { found: false, index: -1, matchLength: 0,
-             usedFuzzyMatch: false, contentForReplacement: content };
-  }
-
-  // When fuzzy matching, we work in the normalized space for replacement
-  return {
-    found: true,
-    index: fuzzyIndex,
-    matchLength: fuzzyOldText.length,
-    usedFuzzyMatch: true,
-    contentForReplacement: fuzzyContent,
-  };
-}`}
+  code={ch03Code6}
   filename="packages/coding-agent/src/core/tools/edit-diff.ts"
   language="typescript"
   startLine={79}
@@ -359,24 +683,7 @@ Edit 工具是 coding agent 的核心 —— 精确修改文件内容。挑战�
 
 <SourceReader
   client:visible
-  code={`export function normalizeForFuzzyMatch(text: string): string {
-  return (
-    text
-      .normalize("NFKC")
-      // 1. Strip trailing whitespace per line
-      .split("\\n")
-      .map((line) => line.trimEnd())
-      .join("\\n")
-      // 2. Smart single quotes → '
-      .replace(/[\\u2018\\u2019\\u201A\\u201B]/g, "'")
-      // 3. Smart double quotes → "
-      .replace(/[\\u201C\\u201D\\u201E\\u201F]/g, '"')
-      // 4. Various dashes/hyphens → -
-      .replace(/[\\u2010\\u2011\\u2012\\u2013\\u2014\\u2015\\u2212]/g, "-")
-      // 5. Special spaces → regular space
-      .replace(/[\\u00A0\\u2002-\\u200A\\u202F\\u205F\\u3000]/g, " ")
-  );
-}`}
+  code={ch03Code7}
   filename="packages/coding-agent/src/core/tools/edit-diff.ts"
   language="typescript"
   startLine={34}
@@ -427,40 +734,12 @@ bash 和 edit 工具都定义了 Operations 接口（`BashOperations`、`EditOpe
   left={{
     label: "BashOperations",
     language: "typescript",
-    code: `export interface BashOperations {
-  exec: (
-    command: string,
-    cwd: string,
-    options: {
-      onData: (data: Buffer) => void;
-      signal?: AbortSignal;
-      timeout?: number;
-      env?: NodeJS.ProcessEnv;
-    },
-  ) => Promise<{ exitCode: number | null }>;
-}
-
-// 使用时传入自定义实现
-createBashTool(cwd, {
-  operations: myRemoteBashOps
-});`
+    code: ch03Code14
   }}
   right={{
     label: "EditOperations",
     language: "typescript",
-    code: `export interface EditOperations {
-  readFile: (path: string) => Promise<Buffer>;
-  writeFile: (path: string, content: string)
-    => Promise<void>;
-  access: (path: string) => Promise<void>;
-}
-
-// 默认实现：本地文件系统
-const defaultEditOperations = {
-  readFile: (p) => fsReadFile(p),
-  writeFile: (p, c) => fsWriteFile(p, c, "utf-8"),
-  access: (p) => fsAccess(p, R_OK | W_OK),
-};`
+    code: ch03Code15
   }}
 />
 
@@ -477,40 +756,7 @@ const defaultEditOperations = {
 
 <SourceReader
   client:visible
-  code={`const fileMutationQueues = new Map<string, Promise<void>>();
-
-async function getMutationQueueKey(filePath: string): Promise<string> {
-  const resolvedPath = resolve(filePath);
-  try {
-    return await realpath(resolvedPath);  // 解析符号链接
-  } catch {
-    return resolvedPath;
-  }
-}
-
-export async function withFileMutationQueue<T>(
-  filePath: string, fn: () => Promise<T>
-): Promise<T> {
-  const key = await getMutationQueueKey(filePath);
-  const currentQueue = fileMutationQueues.get(key) ?? Promise.resolve();
-
-  let releaseNext!: () => void;
-  const nextQueue = new Promise<void>((resolveQueue) => {
-    releaseNext = resolveQueue;
-  });
-  const chainedQueue = currentQueue.then(() => nextQueue);
-  fileMutationQueues.set(key, chainedQueue);
-
-  await currentQueue;
-  try {
-    return await fn();
-  } finally {
-    releaseNext();
-    if (fileMutationQueues.get(key) === chainedQueue) {
-      fileMutationQueues.delete(key);
-    }
-  }
-}`}
+  code={ch03Code8}
   filename="packages/coding-agent/src/core/tools/file-mutation-queue.ts"
   language="typescript"
   highlights={[
@@ -584,57 +830,7 @@ LLM 请求 4 个 edit:
 
 <SourceReader
   client:visible
-  code={`async function executeToolCallsParallel(
-  currentContext: AgentContext,
-  assistantMessage: AssistantMessage,
-  toolCalls: AgentToolCall[],
-  config: AgentLoopConfig,
-  signal: AbortSignal | undefined,
-  emit: AgentEventSink,
-): Promise<ToolResultMessage[]> {
-  const results: ToolResultMessage[] = [];
-  const runnableCalls: PreparedToolCall[] = [];
-
-  // Phase 1: 顺序 prepare
-  for (const toolCall of toolCalls) {
-    await emit({
-      type: "tool_execution_start",
-      toolCallId: toolCall.id,
-      toolName: toolCall.name,
-      args: toolCall.arguments,
-    });
-
-    const preparation = await prepareToolCall(
-      currentContext, assistantMessage, toolCall, config, signal
-    );
-    if (preparation.kind === "immediate") {
-      results.push(await emitToolCallOutcome(
-        toolCall, preparation.result, preparation.isError, emit
-      ));
-    } else {
-      runnableCalls.push(preparation);
-    }
-  }
-
-  // Phase 2: 并发 execute — 关键：.map() 启动所有 Promise
-  const runningCalls = runnableCalls.map((prepared) => ({
-    prepared,
-    execution: executePreparedToolCall(prepared, signal, emit),
-  }));
-
-  // Phase 3: 按源序 finalize — 关键：for...of 按顺序 await
-  for (const running of runningCalls) {
-    const executed = await running.execution;
-    results.push(
-      await finalizeExecutedToolCall(
-        currentContext, assistantMessage,
-        running.prepared, executed, config, signal, emit,
-      ),
-    );
-  }
-
-  return results;
-}`}
+  code={ch03Code9}
   filename="packages/agent/src/agent-loop.ts"
   language="typescript"
   startLine={390}
@@ -669,54 +865,7 @@ for (const running of runningCalls) {
 
 <SourceReader
   client:visible
-  code={`async function prepareToolCall(
-  currentContext: AgentContext,
-  assistantMessage: AssistantMessage,
-  toolCall: AgentToolCall,
-  config: AgentLoopConfig,
-  signal: AbortSignal | undefined,
-): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-  // 1. 查找工具
-  const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
-  if (!tool) {
-    return {
-      kind: "immediate",
-      result: createErrorToolResult(\`Tool \${toolCall.name} not found\`),
-      isError: true,
-    };
-  }
-
-  try {
-    // 2. 验证参数
-    const validatedArgs = validateToolArguments(tool, toolCall);
-
-    // 3. beforeToolCall 钩子
-    if (config.beforeToolCall) {
-      const beforeResult = await config.beforeToolCall(
-        { assistantMessage, toolCall, args: validatedArgs, context: currentContext },
-        signal,
-      );
-      if (beforeResult?.block) {
-        return {
-          kind: "immediate",
-          result: createErrorToolResult(
-            beforeResult.reason || "Tool execution was blocked"
-          ),
-          isError: true,
-        };
-      }
-    }
-    return { kind: "prepared", toolCall, tool, args: validatedArgs };
-  } catch (error) {
-    return {
-      kind: "immediate",
-      result: createErrorToolResult(
-        error instanceof Error ? error.message : String(error)
-      ),
-      isError: true,
-    };
-  }
-}`}
+  code={ch03Code10}
   filename="packages/agent/src/agent-loop.ts"
   language="typescript"
   startLine={458}
@@ -735,44 +884,7 @@ for (const running of runningCalls) {
 
 <SourceReader
   client:visible
-  code={`async function executePreparedToolCall(
-  prepared: PreparedToolCall,
-  signal: AbortSignal | undefined,
-  emit: AgentEventSink,
-): Promise<ExecutedToolCallOutcome> {
-  const updateEvents: Promise<void>[] = [];
-
-  try {
-    const result = await prepared.tool.execute(
-      prepared.toolCall.id,
-      prepared.args as never,
-      signal,
-      (partialResult) => {
-        updateEvents.push(
-          Promise.resolve(
-            emit({
-              type: "tool_execution_update",
-              toolCallId: prepared.toolCall.id,
-              toolName: prepared.toolCall.name,
-              args: prepared.toolCall.arguments,
-              partialResult,
-            }),
-          ),
-        );
-      },
-    );
-    await Promise.all(updateEvents);  // 确保所有进度事件发出
-    return { result, isError: false };
-  } catch (error) {
-    await Promise.all(updateEvents);  // 即使失败也要等进度事件发完
-    return {
-      result: createErrorToolResult(
-        error instanceof Error ? error.message : String(error)
-      ),
-      isError: true,
-    };
-  }
-}`}
+  code={ch03Code11}
   filename="packages/agent/src/agent-loop.ts"
   language="typescript"
   startLine={509}
@@ -814,27 +926,7 @@ for (const running of runningCalls) {
 
 <SourceReader
   client:visible
-  code={`export interface AfterToolCallResult {
-  content?: (TextContent | ImageContent)[];
-  details?: unknown;
-  isError?: boolean;
-}
-
-// finalizeExecutedToolCall 中的合并逻辑
-if (config.afterToolCall) {
-  const afterResult = await config.afterToolCall(
-    { assistantMessage, toolCall: prepared.toolCall,
-      args: prepared.args, result, isError, context: currentContext },
-    signal,
-  );
-  if (afterResult) {
-    result = {
-      content: afterResult.content ?? result.content,   // 有则替换，无则保留
-      details: afterResult.details ?? result.details,
-    };
-    isError = afterResult.isError ?? isError;            // 可独立翻转错误标志
-  }
-}`}
+  code={ch03Code12}
   filename="packages/agent/src/types.ts + agent-loop.ts"
   language="typescript"
   highlights={[
@@ -889,27 +981,7 @@ Pi 默认使用并行模式，但也支持顺序模式：
 
 <SourceReader
   client:visible
-  code={`export type ToolExecutionMode = "sequential" | "parallel";
-
-async function executeToolCalls(
-  currentContext: AgentContext,
-  assistantMessage: AssistantMessage,
-  config: AgentLoopConfig,
-  signal: AbortSignal | undefined,
-  emit: AgentEventSink,
-): Promise<ToolResultMessage[]> {
-  const toolCalls = assistantMessage.content.filter(
-    (c) => c.type === "toolCall"
-  );
-  if (config.toolExecution === "sequential") {
-    return executeToolCallsSequential(
-      currentContext, assistantMessage, toolCalls, config, signal, emit
-    );
-  }
-  return executeToolCallsParallel(
-    currentContext, assistantMessage, toolCalls, config, signal, emit
-  );
-}`}
+  code={ch03Code13}
   filename="packages/agent/src/agent-loop.ts"
   language="typescript"
   startLine={336}
@@ -1013,50 +1085,12 @@ demos/03-tool-system/06-update-then-fail.ts
   left={{
     label: "Pi 的 AgentTool",
     language: "typescript",
-    code: `// Pi: 完整的工具定义
-interface AgentTool<TParams, TDetails> {
-  name: string;
-  label: string;         // UI 显示名
-  description: string;   // LLM 看的说明
-  parameters: TParams;   // TypeBox Schema
-
-  execute: (
-    toolCallId: string,
-    params: Static<TParams>,
-    signal?: AbortSignal,
-    onUpdate?: AgentToolUpdateCallback,
-  ) => Promise<AgentToolResult<TDetails>>;
-}
-
-// 返回值分离 content 和 details
-interface AgentToolResult<T> {
-  content: (TextContent | ImageContent)[];
-  details: T;  // UI-only metadata
-}`
+    code: ch03Code16
   }}
   right={{
     label: "简化版工具",
     language: "typescript",
-    code: `// 简化：去掉 UI 相关的复杂度
-interface SimpleTool {
-  name: string;
-  description: string;
-  parameters: TSchema;
-
-  execute: (
-    params: Record<string, unknown>,
-  ) => Promise<string>;
-}
-
-// 返回值就是一个字符串
-// 没有 content/details 分离
-// 没有 signal（不支持取消）
-// 没有 onUpdate（不支持进度）
-// 没有 toolCallId（不需要关联）
-
-
-
-`
+    code: ch03Code17
   }}
 />
 
