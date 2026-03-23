@@ -13,14 +13,17 @@ import { printEvent } from "@pi-tutorial/shared";
 import { buildSystemPrompt } from "./prompt.js";
 
 // ── 工具注册（在这里添加你的工具）──────────────────────────────
+import { readCsvSchema, executeReadCsv } from "./tools/read_csv.js";
 // import { myToolSchema, executeMyTool } from "./tools/my-tool.js";
 
 const ALL_TOOLS: Anthropic.Tool[] = [
+  readCsvSchema,
   // TODO: 把你的工具 schema 加到这里
   // myToolSchema,
 ];
 
 const TOOL_EXECUTORS: Record<string, (input: Record<string, unknown>) => Promise<string>> = {
+  read_csv: (input) => executeReadCsv(input as any),
   // TODO: 把你的工具执行器加到这里
   // my_tool: (input) => executeMyTool(input as any),
 };

@@ -10,6 +10,68 @@ Agent 的本质就是 **LLM + 工具 + 循环**。你不需要从零开始 — `
 2. 写你的 System Prompt
 3. 注册到 agent 中
 
+## 快速上手示例
+
+项目已经内置了一个可运行的 `read_csv` 工具，让你开箱就能看到完整的 Agent 效果。以下是它的实现方式，你创建自己的工具时可以照搬这个模式。
+
+### 1. 工具实现（`src/tools/read_csv.ts`）
+
+每个工具文件导出两样东西：**Schema**（告诉 LLM 这个工具是什么）和 **Execute 函数**（实际执行逻辑）：
+
+```typescript
+// Schema — LLM 通过这个 JSON 判断何时调用
+export const readCsvSchema: Anthropic.Tool = {
+  name: "read_csv",
+  description: "读取 CSV 文件，返回表头和前 N 行数据。",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      path:  { type: "string", description: "CSV 文件路径" },
+      limit: { type: "number", description: "返回的最大行数（默认 5）" },
+    },
+    required: ["path"],
+  },
+};
+
+// Execute — 接收 LLM 传来的参数，返回字符串
+export async function executeReadCsv(input: { path: string; limit?: number }): Promise<string> {
+  // 文件不存在时返回错误文本（不要 throw，让 LLM 看到错误并调整策略）
+  if (!existsSync(path)) return `Error: 文件 "${path}" 不存在。`;
+  // ... 读取并格式化 CSV 内容
+}
+```
+
+### 2. 在 `agent.ts` 中注册
+
+```typescript
+import { readCsvSchema, executeReadCsv } from "./tools/read_csv.js";
+
+// 添加到 ALL_TOOLS:
+const ALL_TOOLS = [readCsvSchema];
+
+// 添加到 TOOL_EXECUTORS:
+const TOOL_EXECUTORS = { read_csv: (input) => executeReadCsv(input as any) };
+```
+
+### 3. 在 `prompt.ts` 中添加使用指南
+
+```typescript
+const TOOL_GUIDELINES = {
+  read_csv: "- 先用 read_csv 了解数据结构（表头和前几行）\n- 注意数据类型（数字、日期、文本）",
+};
+```
+
+### 4. 直接测试工具（无需 API Key）
+
+```bash
+# 在终端直接测试工具逻辑：
+npx tsx -e "import {executeReadCsv} from './src/tools/read_csv.js'; executeReadCsv({path:'fixtures/data-analysis/sales.csv'}).then(console.log)"
+```
+
+> **创建你自己的工具**：复制 `src/tools/read_csv.ts`，修改 Schema 和 Execute 函数，然后在 `agent.ts` 中注册即可。
+
+---
+
 ## 选择你的方向
 
 | 方向 | 推荐工具 | System Prompt 重点 | 测试数据 |
@@ -114,7 +176,8 @@ demos/09-graduation/
 │   ├── agent.ts          ← Agent 循环（已实现，可扩展）
 │   ├── prompt.ts         ← System Prompt（需要你修改）
 │   └── tools/
-│       └── template.ts   ← 工具模板（复制并修改）
+│       ├── template.ts   ← 工具模板（复制并修改）
+│       └── read_csv.ts   ← 完整示例工具（可直接运行）
 ├── fixtures/
 │   ├── data-analysis/
 │   │   └── sales.csv     ← 销售数据样本
