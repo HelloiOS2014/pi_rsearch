@@ -69,7 +69,7 @@ export default function SourceReader({
             fontFamily: "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace",
             fontSize: '0.8125rem', lineHeight: 1.6, border: 'none',
           }}>
-            <code>
+            <code style={{ display: 'block' }}>
               {lines.map((line, i) => {
                 const num = startLine + i;
                 const isHl = hlMap.has(num);

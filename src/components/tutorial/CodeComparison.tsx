@@ -49,7 +49,7 @@ function Panel({ config, accent, tag }: { config: CodePanelConfig; accent: strin
           margin: 0, padding: '0.75rem 0', background: 'transparent', border: 'none',
           fontFamily: "'JetBrains Mono', 'SF Mono', monospace", fontSize: '0.8125rem', lineHeight: 1.6,
         }}>
-          <code>
+          <code style={{ display: 'block' }}>
             {lines.map((line, i) => (
               <div key={i} style={{ display: 'flex', padding: '0 14px 0 0' }}>
                 <span style={{ display: 'inline-block', width: 36, textAlign: 'right', paddingRight: 10, flexShrink: 0, color: 'var(--text-muted)', opacity: 0.35, fontSize: '0.75rem', userSelect: 'none' }}>{i + 1}</span>
