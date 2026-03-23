@@ -16,7 +16,7 @@ const BI = new Set('console,process,Promise,Array,Object,String,Number,Boolean,M
 
 function hl(text: string): JSX.Element[] {
   const out: JSX.Element[] = [];
-  const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+\.?\d*\b)|(\b[a-zA-Z_$][\w$]*\b)|(=>|\.\.\.|\?\.|&&|\|\||[!=]==?|[<>]=?|[{}()[\];:,.])|(\s+)/g;
+  const re = /(\/\/.*$|\/\*.*?\*\/|^\s*\*\s.*$|^\s*\*\/$|^\s*\/\*\*?.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+\.?\d*\b)|(\b[a-zA-Z_$][\w$]*\b)|(=>|\.\.\.|\?\.|&&|\|\||[!=]==?|[<>]=?|[{}()[\];:,.])|(\s+)/g;
   let m: RegExpExecArray | null, last = 0, k = 0;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) out.push(<span key={k++}>{text.slice(last, m.index)}</span>);
