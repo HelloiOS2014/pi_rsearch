@@ -7,6 +7,11 @@ description: "10 分钟建立全局认知，知道学完能得到什么"
 import SourceReader from '../../components/tutorial/SourceReader';
 import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
 
+export const codeAgentCoreIndex = `export * from "./agent.js";
+export * from "./agent-loop.js";
+export * from "./proxy.js";
+export * from "./types.js";`;
+
 # 全景导读
 
 用 10 分钟建立全局认知。读完这一章，你会知道：什么是 AI Coding Agent、为什么选 Pi 来学、Pi 的架构长什么样、以及接下来 8 章的学习路线。
@@ -77,10 +82,7 @@ Pi 采用三层架构，从底向上依次是：
 
 <SourceReader client:visible
   filename="packages/agent/src/index.ts"
-  code={`export * from "./agent.js";
-export * from "./agent-loop.js";
-export * from "./proxy.js";
-export * from "./types.js";`}
+  code={codeAgentCoreIndex}
   highlights={[
     { line: 1, note: "Agent 类 — 带状态管理的高层封装" },
     { line: 2, note: "agentLoop — 核心循环，整个框架的心脏" },

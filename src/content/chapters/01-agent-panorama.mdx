@@ -7,6 +7,234 @@ description: "理解 Agent 核心定义，30 行代码写出最小 Agent，理�
 import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
 
+export const codeKnownProvider = `export type KnownProvider =
+  | "amazon-bedrock"
+  | "anthropic"
+  | "google"
+  | "google-gemini-cli"
+  | "google-vertex"
+  | "openai"
+  | "azure-openai-responses"
+  | "openai-codex"
+  | "github-copilot"
+  | "xai"
+  | "groq"
+  | "cerebras"
+  | "openrouter"
+  | "vercel-ai-gateway"
+  | "mistral"
+  | "minimax"
+  | "huggingface"
+  | "kimi-coding";
+  // ...还有更多`;
+
+export const codeAssistantMessageEvent = `export type AssistantMessageEvent =
+  | { type: "start"; partial: AssistantMessage }
+  | { type: "text_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
+  | { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
+  | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
+  | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+  | { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
+  | { type: "done"; reason: StopReason; message: AssistantMessage }
+  | { type: "error"; reason: StopReason; error: AssistantMessage };`;
+
+export const codeAgentLoopFn = `export function agentLoop(
+  prompts: AgentMessage[],
+  context: AgentContext,
+  config: AgentLoopConfig,
+  signal?: AbortSignal,
+  streamFn?: StreamFn,
+): EventStream<AgentEvent, AgentMessage[]> {
+  const stream = createAgentStream();
+
+  void runAgentLoop(
+    prompts, context, config,
+    async (event) => { stream.push(event); },
+    signal, streamFn,
+  ).then((messages) => { stream.end(messages); });
+
+  return stream;
+}`;
+
+export const codeAgentClass = `export class Agent {
+  private _state: AgentState = {
+    systemPrompt: "",
+    model: getModel("google", "gemini-2.5-flash-lite-preview-06-17"),
+    thinkingLevel: "off",
+    tools: [],
+    messages: [],
+    isStreaming: false,
+    streamMessage: null,
+    pendingToolCalls: new Set<string>(),
+    error: undefined,
+  };
+
+  private listeners = new Set<(e: AgentEvent) => void>();
+  private abortController?: AbortController;
+  // ...
+}`;
+
+export const codeAgentTool = `// AgentTool extends Tool but adds the execute function
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any>
+  extends Tool<TParameters> {
+  // A human-readable label for the tool to be displayed in UI
+  label: string;
+  execute: (
+    toolCallId: string,
+    params: Static<TParameters>,
+    signal?: AbortSignal,
+    onUpdate?: AgentToolUpdateCallback<TDetails>,
+  ) => Promise<AgentToolResult<TDetails>>;
+}`;
+
+export const codeAgentEvent = `export type AgentEvent =
+  // Agent lifecycle
+  | { type: "agent_start" }
+  | { type: "agent_end"; messages: AgentMessage[] }
+  // Turn lifecycle
+  | { type: "turn_start" }
+  | { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+  // Message lifecycle
+  | { type: "message_start"; message: AgentMessage }
+  | { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
+  | { type: "message_end"; message: AgentMessage }
+  // Tool execution lifecycle
+  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+  | { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+  | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };`;
+
+export const codeCompareLeftLlm = `// Step 1: 裸调 LLM — 一问一答
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+const response = await client.messages.create({
+  model: "claude-sonnet-4-5-20250514",
+  max_tokens: 1024,
+  messages: [
+    { role: "user", content: "什么是 Agent？" }
+  ],
+});
+
+console.log(response.content[0].text);
+
+// 特点：
+// - 单次调用，无循环
+// - 无工具
+// - LLM 只能生成文本
+// - 一问一答就结束`;
+
+export const codeCompareRightAgent = `// Step 3: Agent Loop — 自主决策执行
+const messages = [{ role: "user", content: input }];
+
+while (true) {
+  const response = await client.messages.create({
+    model: "claude-sonnet-4-5-20250514",
+    max_tokens: 1024,
+    tools,
+    messages,
+  });
+
+  messages.push({
+    role: "assistant", content: response.content
+  });
+
+  if (response.stop_reason !== "tool_use") break;
+
+  const toolResults = [];
+  for (const block of response.content) {
+    if (block.type === "tool_use") {
+      const result = executeMyTool(block.name, block.input);
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: String(result),
+      });
+    }
+  }
+  messages.push({ role: "user", content: toolResults });
+}
+
+// 特点：
+// - while(true) 循环驱动
+// - LLM 自主决定调用工具
+// - 观察结果后继续推理
+// - 任务完成才退出`;
+
+export const codeBridge100 = `// ── 变化 1：多工具定义（30 行版本只有 1 个）────────────────────
+const tools: Anthropic.Tool[] = [
+  {
+    name: "calculator",
+    description: "计算数学表达式，返回结果",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        expression: { type: "string", description: "数学表达式，如 '2 + 3 * 4'" },
+      },
+      required: ["expression"],
+    },
+  },
+  {
+    name: "read_file",
+    description: "读取文件内容",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        path: { type: "string", description: "文件路径" },
+      },
+      required: ["path"],
+    },
+  },
+];
+
+// ── 变化 2：工具执行加 try/catch（30 行版本没有错误处理）──────
+function executeTool(name: string, input: Record<string, unknown>): string {
+  try {
+    if (name === "calculator") {
+      const expr = input.expression as string;
+      return String(Function(\`"use strict"; return (\${expr})\`)());
+    }
+    if (name === "read_file") {
+      const path = input.path as string;
+      const content = readFileSync(path, "utf-8");
+      return content.length > 5000
+        ? content.slice(0, 5000) + "\\n...(truncated)"
+        : content;
+    }
+    return \`Error: unknown tool "\${name}"\`;
+  } catch (err) {
+    // 错误变成工具结果文本，不会让 Agent 崩溃
+    return \`Error: \${err instanceof Error ? err.message : String(err)}\`;
+  }
+}
+
+// ── 变化 3：事件发射（30 行版本是"黑盒"）────────────────────
+while (turn < MAX_TURNS) {
+  turn++;
+  printEvent("turn_start", \`Turn \${turn}\`);     // ← 新增：回合开始
+
+  const response = await client.messages.create({ model, max_tokens: 1024, tools, messages });
+  messages.push({ role: "assistant", content: response.content });
+
+  if (response.stop_reason !== "tool_use") {
+    printEvent("turn_end", "最终回复");             // ← 新增：回合结束
+    break;
+  }
+
+  for (const block of response.content) {
+    if (block.type === "tool_use") {
+      printEvent("tool_call", \`\${block.name}(...)\`);  // ← 新增：工具调用
+      const result = executeTool(block.name, block.input as Record<string, unknown>);
+      printEvent("tool_result", result.slice(0, 200)); // ← 新增：工具结果
+      toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
+    }
+  }
+  messages.push({ role: "user", content: toolResults });
+}`;
+
 # Agent 全景
 
 本章目标：从零理解 Agent 是什么，看懂 Pi 的三层架构，最后用 30 行代码写出一个最小 Agent。
@@ -91,9 +319,7 @@ Pi 是一个开源的 coding agent，用 TypeScript 实现，代码量约 1,900 
 
 核心类型：
 
-<SourceReader
-  client:visible
-  code={`// Model — 描述一个 LLM 模型的所有信息
+export const codeModelTypes = `// Model — 描述一个 LLM 模型的所有信息
 export interface Model<TApi extends Api> {
   id: string;
   name: string;
@@ -120,7 +346,11 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 }
 
 // Message — LLM 对话中的三种消息
-export type Message = UserMessage | AssistantMessage | ToolResultMessage;`}
+export type Message = UserMessage | AssistantMessage | ToolResultMessage;`;
+
+<SourceReader
+  client:visible
+  code={codeModelTypes}
   filename="packages/ai/src/types.ts"
   language="typescript"
   highlights={[
@@ -137,26 +367,7 @@ pi-ai 支持 20+ Provider 的懒加载：
 
 <SourceReader
   client:visible
-  code={`export type KnownProvider =
-  | "amazon-bedrock"
-  | "anthropic"
-  | "google"
-  | "google-gemini-cli"
-  | "google-vertex"
-  | "openai"
-  | "azure-openai-responses"
-  | "openai-codex"
-  | "github-copilot"
-  | "xai"
-  | "groq"
-  | "cerebras"
-  | "openrouter"
-  | "vercel-ai-gateway"
-  | "mistral"
-  | "minimax"
-  | "huggingface"
-  | "kimi-coding";
-  // ...还有更多`}
+  code={codeKnownProvider}
   filename="packages/ai/src/types.ts"
   language="typescript"
   startLine={19}
@@ -170,19 +381,7 @@ pi-ai 支持 20+ Provider 的懒加载：
 
 <SourceReader
   client:visible
-  code={`export type AssistantMessageEvent =
-  | { type: "start"; partial: AssistantMessage }
-  | { type: "text_start"; contentIndex: number; partial: AssistantMessage }
-  | { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-  | { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
-  | { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
-  | { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-  | { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
-  | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
-  | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-  | { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
-  | { type: "done"; reason: StopReason; message: AssistantMessage }
-  | { type: "error"; reason: StopReason; error: AssistantMessage };`}
+  code={codeAssistantMessageEvent}
   filename="packages/ai/src/types.ts"
   language="typescript"
   startLine={237}
@@ -202,23 +401,7 @@ pi-ai 支持 20+ Provider 的懒加载：
 
 <SourceReader
   client:visible
-  code={`export function agentLoop(
-  prompts: AgentMessage[],
-  context: AgentContext,
-  config: AgentLoopConfig,
-  signal?: AbortSignal,
-  streamFn?: StreamFn,
-): EventStream<AgentEvent, AgentMessage[]> {
-  const stream = createAgentStream();
-
-  void runAgentLoop(
-    prompts, context, config,
-    async (event) => { stream.push(event); },
-    signal, streamFn,
-  ).then((messages) => { stream.end(messages); });
-
-  return stream;
-}`}
+  code={codeAgentLoopFn}
   filename="packages/agent/src/agent-loop.ts"
   language="typescript"
   startLine={31}
@@ -233,23 +416,7 @@ pi-ai 支持 20+ Provider 的懒加载：
 
 <SourceReader
   client:visible
-  code={`export class Agent {
-  private _state: AgentState = {
-    systemPrompt: "",
-    model: getModel("google", "gemini-2.5-flash-lite-preview-06-17"),
-    thinkingLevel: "off",
-    tools: [],
-    messages: [],
-    isStreaming: false,
-    streamMessage: null,
-    pendingToolCalls: new Set<string>(),
-    error: undefined,
-  };
-
-  private listeners = new Set<(e: AgentEvent) => void>();
-  private abortController?: AbortController;
-  // ...
-}`}
+  code={codeAgentClass}
   filename="packages/agent/src/agent.ts"
   language="typescript"
   startLine={116}
@@ -265,18 +432,7 @@ pi-ai 支持 20+ Provider 的懒加载：
 
 <SourceReader
   client:visible
-  code={`// AgentTool extends Tool but adds the execute function
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any>
-  extends Tool<TParameters> {
-  // A human-readable label for the tool to be displayed in UI
-  label: string;
-  execute: (
-    toolCallId: string,
-    params: Static<TParameters>,
-    signal?: AbortSignal,
-    onUpdate?: AgentToolUpdateCallback<TDetails>,
-  ) => Promise<AgentToolResult<TDetails>>;
-}`}
+  code={codeAgentTool}
   filename="packages/agent/src/types.ts"
   language="typescript"
   startLine={273}
@@ -292,21 +448,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 
 <SourceReader
   client:visible
-  code={`export type AgentEvent =
-  // Agent lifecycle
-  | { type: "agent_start" }
-  | { type: "agent_end"; messages: AgentMessage[] }
-  // Turn lifecycle
-  | { type: "turn_start" }
-  | { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
-  // Message lifecycle
-  | { type: "message_start"; message: AgentMessage }
-  | { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
-  | { type: "message_end"; message: AgentMessage }
-  // Tool execution lifecycle
-  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
-  | { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-  | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };`}
+  code={codeAgentEvent}
   filename="packages/agent/src/types.ts"
   language="typescript"
   startLine={295}
@@ -495,65 +637,12 @@ while (true) {
 
 <CodeComparison client:visible
   left={{
-    code: `// Step 1: 裸调 LLM — 一问一答
-import Anthropic from "@anthropic-ai/sdk";
-
-const client = new Anthropic();
-const response = await client.messages.create({
-  model: "claude-sonnet-4-5-20250514",
-  max_tokens: 1024,
-  messages: [
-    { role: "user", content: "什么是 Agent？" }
-  ],
-});
-
-console.log(response.content[0].text);
-
-// 特点：
-// - 单次调用，无循环
-// - 无工具
-// - LLM 只能生成文本
-// - 一问一答就结束`,
+    code: codeCompareLeftLlm,
     label: "Step 1: 裸调 LLM",
     language: "typescript"
   }}
   right={{
-    code: `// Step 3: Agent Loop — 自主决策执行
-const messages = [{ role: "user", content: input }];
-
-while (true) {
-  const response = await client.messages.create({
-    model: "claude-sonnet-4-5-20250514",
-    max_tokens: 1024,
-    tools,
-    messages,
-  });
-
-  messages.push({
-    role: "assistant", content: response.content
-  });
-
-  if (response.stop_reason !== "tool_use") break;
-
-  const toolResults = [];
-  for (const block of response.content) {
-    if (block.type === "tool_use") {
-      const result = executeMyTool(block.name, block.input);
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: String(result),
-      });
-    }
-  }
-  messages.push({ role: "user", content: toolResults });
-}
-
-// 特点：
-// - while(true) 循环驱动
-// - LLM 自主决定调用工具
-// - 观察结果后继续推理
-// - 任务完成才退出`,
+    code: codeCompareRightAgent,
     label: "Step 3: 完整 Agent Loop",
     language: "typescript"
   }}
@@ -581,76 +670,7 @@ npx tsx demos/01-hello-agent/src/04-bridge-100.ts
 
 <SourceReader
   client:visible
-  code={`// ── 变化 1：多工具定义（30 行版本只有 1 个）────────────────────
-const tools: Anthropic.Tool[] = [
-  {
-    name: "calculator",
-    description: "计算数学表达式，返回结果",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        expression: { type: "string", description: "数学表达式，如 '2 + 3 * 4'" },
-      },
-      required: ["expression"],
-    },
-  },
-  {
-    name: "read_file",
-    description: "读取文件内容",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        path: { type: "string", description: "文件路径" },
-      },
-      required: ["path"],
-    },
-  },
-];
-
-// ── 变化 2：工具执行加 try/catch（30 行版本没有错误处理）──────
-function executeTool(name: string, input: Record<string, unknown>): string {
-  try {
-    if (name === "calculator") {
-      const expr = input.expression as string;
-      return String(Function(\`"use strict"; return (\${expr})\`)());
-    }
-    if (name === "read_file") {
-      const path = input.path as string;
-      const content = readFileSync(path, "utf-8");
-      return content.length > 5000
-        ? content.slice(0, 5000) + "\\n...(truncated)"
-        : content;
-    }
-    return \`Error: unknown tool "\${name}"\`;
-  } catch (err) {
-    // 错误变成工具结果文本，不会让 Agent 崩溃
-    return \`Error: \${err instanceof Error ? err.message : String(err)}\`;
-  }
-}
-
-// ── 变化 3：事件发射（30 行版本是"黑盒"）────────────────────
-while (turn < MAX_TURNS) {
-  turn++;
-  printEvent("turn_start", \`Turn \${turn}\`);     // ← 新增：回合开始
-
-  const response = await client.messages.create({ model, max_tokens: 1024, tools, messages });
-  messages.push({ role: "assistant", content: response.content });
-
-  if (response.stop_reason !== "tool_use") {
-    printEvent("turn_end", "最终回复");             // ← 新增：回合结束
-    break;
-  }
-
-  for (const block of response.content) {
-    if (block.type === "tool_use") {
-      printEvent("tool_call", \`\${block.name}(...)\`);  // ← 新增：工具调用
-      const result = executeTool(block.name, block.input as Record<string, unknown>);
-      printEvent("tool_result", result.slice(0, 200)); // ← 新增：工具结果
-      toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
-    }
-  }
-  messages.push({ role: "user", content: toolResults });
-}`}
+  code={codeBridge100}
   filename="demos/01-hello-agent/src/04-bridge-100.ts"
   language="typescript"
   highlights={[
