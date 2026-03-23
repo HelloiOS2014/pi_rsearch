@@ -1,13 +1,10 @@
 {
-  "name": "@pi-tutorial/demo-01-hello-agent",
+  "name": "@pi-tutorial/demo-09-graduation",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "demo:01": "npx tsx src/01-raw-llm-call.ts",
-    "demo:02": "npx tsx src/02-add-tool-call.ts",
-    "demo:03": "npx tsx src/03-agent-loop.ts",
-    "demo:04": "npx tsx src/04-bridge-100.ts",
+    "start": "npx tsx src/main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

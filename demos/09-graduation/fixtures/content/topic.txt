@@ -1,0 +1,11 @@
+写作主题：AI Agent 的未来发展趋势
+
+请围绕以下方向撰写一篇 1000 字的分析文章：
+1. Agent 与传统软件开发的区别
+2. 多 Agent 协作的可能性
+3. Agent 安全性与可控性的挑战
+
+参考资料：
+- https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+- https://www.anthropic.com/engineering/building-effective-agents
+- https://github.com/anthropics/anthropic-cookbook

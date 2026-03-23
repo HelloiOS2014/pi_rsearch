@@ -887,7 +887,32 @@ export async function resolveConfig(
 
 ---
 
-## 6.6 三种运行模式
+## 6.6 成本与约束
+
+构建 Agent 时，成本是不可忽视的：
+
+**Token 计费公式**：
+```
+cost = (input_tokens × price_per_M / 1,000,000) + (output_tokens × price_per_M / 1,000,000)
+```
+
+**一次 Agent Run 的典型成本**：
+
+| 场景 | 轮数 | Token 消耗 | 费用（Claude Sonnet） |
+|------|------|-----------|---------------------|
+| 简单问答 | 1 轮 | ~2K | ~$0.01 |
+| 修复一个 bug | 3-5 轮 | 10-30K | $0.03-0.10 |
+| 大型重构 | 10-20 轮 | 50-200K | $0.15-0.60 |
+
+**控制成本的手段**：
+- `maxTurns`: 限制最大轮数（Demo 06 设了 20 轮上限）
+- `maxTokens`: 限制每轮输出长度
+- Compaction: 在 context 接近 window 限制时自动压缩
+- 模型选择: 简单工具调用用便宜模型，复杂推理用贵模型
+
+---
+
+## 6.7 三种运行模式
 
 Pi 支持三种运行模式，所有模式共享同一个 `AgentSession` 核心：
 
@@ -958,7 +983,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 
 ---
 
-## 6.7 动手：构建你的 Agent
+## 6.8 动手：构建你的 Agent
 
 ### Demo 06 架构
 
@@ -1298,7 +1323,122 @@ npx tsx src/main.ts --continue
 
 ---
 
-## 6.8 本章小结
+## 6.9 毕业项目：设计你自己的 Agent
+
+学了 6 章，是时候构建自己的 Agent 了 — 不是复制 Pi，不是复制 Demo 06，而是解决一个你自己的问题。
+
+### 关键洞察：Agent Loop 是通用的
+
+先看一个 50 行的"天气查询 Agent"：
+
+```typescript
+// 和 Ch01 的 30 行版本结构完全相同 — 只换了工具和 prompt
+const tools = [{
+  name: 'get_weather',
+  description: '查询城市天气',
+  input_schema: {
+    type: 'object',
+    properties: { city: { type: 'string', description: '城市名' } },
+    required: ['city']
+  }
+}];
+
+function executeTool(name: string, input: any): string {
+  if (name === 'get_weather') {
+    // 模拟天气 API
+    const weather: Record<string, string> = {
+      '北京': '晴，25°C，湿度 60%',
+      '上海': '多云，22°C，湿度 75%',
+    };
+    return weather[input.city] || `未找到 ${input.city} 的天气数据`;
+  }
+  return 'Unknown tool';
+}
+
+// Agent Loop — 和 Ch01 完全一样！
+const messages = [{ role: 'user', content: '北京和上海今天哪个城市更热？' }];
+
+while (true) {
+  const response = await client.messages.create({
+    model: 'claude-sonnet-4-5-20250514',
+    max_tokens: 1024,
+    tools,
+    system: '你是天气助手。用 get_weather 工具查询天气后回答用户。',
+    messages,
+  });
+
+  messages.push({ role: 'assistant', content: response.content });
+  if (response.stop_reason !== 'tool_use') break;
+
+  const toolResults = [];
+  for (const block of response.content) {
+    if (block.type === 'tool_use') {
+      const result = executeTool(block.name, block.input);
+      toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
+    }
+  }
+  messages.push({ role: 'user', content: toolResults });
+}
+```
+
+**看到了吗？Agent Loop 完全不变，你只需要换工具和 prompt。这就是通用框架的力量。**
+
+### 选择你的方向
+
+| 方向 | 工具集 | System Prompt 重点 |
+|------|--------|-------------------|
+| 数据分析 Agent | read_csv, query_sql, plot_chart | '你是数据分析师，先理解数据结构再写查询' |
+| DevOps Agent | ssh_exec, read_logs, check_status | '你是运维工程师，优先检查日志，谨慎执行命令' |
+| 内容创作 Agent | search_web, write_file, read_file | '你是内容创作者，先调研再写作' |
+| 自由发挥 | 你自己决定 | 你自己设计 |
+
+### 开始构建
+
+```bash
+cd demos/09-graduation
+cat README.md  # 阅读详细指南
+```
+
+### 验收标准
+
+- [ ] Agent 能在 3 轮内完成一个典型任务
+- [ ] 至少有 2 个自定义工具
+- [ ] System Prompt 包含工具使用指南
+- [ ] 能处理工具执行失败（不崩溃）
+- [ ] 能在 mock 模式下演示完整流程
+
+完成后，你就真正理解了 Agent 的本质 — 不是 Pi 的代码，而是 **LLM + 工具 + 循环** 这个通用模式。
+
+---
+
+## 6.10 练习
+
+### 练习 1：给 Demo 06 添加 `http_get` 工具
+
+**做什么**：
+- 在 `demos/06-my-agent/src/tools/` 下创建 `http-get.ts`
+- 定义 schema（参数：`url: string`）
+- 实现 fetch 调用（mock 模式返回固定 HTML）
+- 在 `agent.ts` 的 `TOOL_EXECUTORS` 中注册
+- 在 `prompt.ts` 添加使用指南
+
+**预期行为**：Agent 收到"帮我看看 example.com 的内容"时调用 http_get
+
+**需要 API Key**：否（可以先用 mock 模式验证工具注册正确）
+
+### 练习 2：修改 prompt.ts 加安全规则
+
+**做什么**：
+- 在 `demos/06-my-agent/src/prompt.ts` 的 Guidelines 中加入：
+  "每次执行 bash 命令前，先用 read_file 确认相关文件内容"
+
+**预期行为**：Agent 在执行 bash 前会先读取相关文件（可观察 tool call 顺序变化）
+
+**需要 API Key**：否（修改 prompt 后可在 mock 模式下查看 system prompt 输出）
+
+---
+
+## 6.11 本章小结
 
 本章是整个教程的 capstone。我们把前 5 章学到的概念整合成一个完整的 coding agent：
 

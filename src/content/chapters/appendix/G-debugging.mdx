@@ -1,0 +1,85 @@
+---
+title: "Agent 调试指南"
+chapter: 97
+description: "Agent 卡死、token 爆炸、工具出错时的排查方法"
+---
+
+# Agent 调试指南
+
+> 本附录聚焦 Agent 开发过程中的行为调试。运行环境问题（API Key 配置、网络连接）请参考[附录 C](/appendix/c-troubleshooting)。
+
+## 1. Agent 无限循环
+
+**症状**：Agent 不停调用工具，永远不停。
+
+**排查**：
+- 打印 messages 数组长度：`console.log("Turn", turn, "messages:", messages.length)`
+- 检查最后 3 条消息：`console.log(JSON.stringify(messages.slice(-3), null, 2))`
+- 常见原因：工具返回的结果不够明确，LLM 认为任务未完成继续调用
+- 修复：设置 `maxTurns` 上限；改进工具的返回信息让 LLM 知道任务已完成
+
+## 2. Token 爆炸（Context Window Overflow）
+
+**症状**：API 报错 "prompt is too long" 或 "context window exceeded"。
+
+**排查**：
+- 估算 token：`const estimatedTokens = JSON.stringify(messages).length / 4`
+- 定位大消息：找出哪条消息特别长（通常是工具返回了大量文本）
+- 修复：
+  - 限制工具输出长度（如 bash 工具截断到 50KB）
+  - 启用 Compaction（参考 Ch06.3）
+  - 减少 system prompt 长度
+
+## 3. 工具调用错误
+
+**症状**：LLM 调用工具但参数格式错误，或工具执行失败。
+
+**排查**：
+- 打印工具调用参数：`console.log("Tool call:", toolName, JSON.stringify(input))`
+- 检查 schema 定义是否清晰（description 是否描述了参数格式）
+- 检查 AJV 验证是否开启 coerceTypes
+- 修复：改进 schema 的 description；在 execute 中加参数校验
+
+## 4. LLM 不调用工具
+
+**症状**：给 Agent 一个需要工具的任务，但 LLM 直接回答而不调用工具。
+
+**排查**：
+- 检查 system prompt 是否明确要求使用工具
+- 检查 tools 数组是否传给了 LLM
+- 检查工具的 description 是否清楚描述了用途
+- 修复：在 system prompt 中加入"你必须使用工具来完成任务，不要直接猜测答案"
+
+## 5. 跨 Provider 消息格式错误
+
+**症状**：切换模型后 API 报错 "invalid message format"。
+
+**排查**：
+- 检查是否用了 transformMessages（Ch05.3）
+- 检查 thinking blocks 是否在跨模型时被正确处理（丢弃或转 text）
+- 检查 tool call ID 格式是否兼容目标模型
+- 修复：在切换模型前调用 transformMessages 归一化消息
+
+## 6. 实用调试技巧
+
+**打印最近消息**：
+```typescript
+// 在 agent loop 的每轮开始时加入
+console.log(`=== Turn ${turn} ===`);
+console.log(`Messages: ${messages.length}, Est. tokens: ${JSON.stringify(messages).length / 4}`);
+console.log(`Last message role: ${messages.at(-1)?.role}`);
+```
+
+**计时**：
+```typescript
+const start = Date.now();
+const response = await client.messages.create({...});
+console.log(`LLM responded in ${Date.now() - start}ms`);
+```
+
+**保存调试日志**：
+```typescript
+import { writeFileSync } from 'fs';
+// 在 agent loop 结束后
+writeFileSync('debug-messages.json', JSON.stringify(messages, null, 2));
+```
