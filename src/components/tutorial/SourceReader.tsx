@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 
 interface SourceReaderProps {
   code: string;
@@ -9,215 +9,107 @@ interface SourceReaderProps {
   githubUrl?: string;
 }
 
-/* ─── Minimal TypeScript/JS syntax highlighter ─── */
+/* ─── Syntax highlighter ─── */
 
-const KEYWORDS = new Set([
-  'import','export','from','const','let','var','function','return','if','else',
-  'for','while','do','switch','case','break','continue','new','this','class',
-  'extends','implements','interface','type','enum','async','await','yield',
-  'try','catch','finally','throw','typeof','instanceof','in','of','void',
-  'delete','default','true','false','null','undefined','as','is','keyof',
-  'readonly','static','public','private','protected','abstract','declare',
-  'module','namespace','require','super','constructor','get','set',
-]);
+const KW = new Set('import,export,from,const,let,var,function,return,if,else,for,while,do,switch,case,break,continue,new,this,class,extends,implements,interface,type,enum,async,await,yield,try,catch,finally,throw,typeof,instanceof,in,of,void,delete,default,true,false,null,undefined,as,is,keyof,readonly,static,public,private,protected,abstract,declare,module,namespace,require,super,constructor,get,set'.split(','));
+const BI = new Set('console,process,Promise,Array,Object,String,Number,Boolean,Map,Set,Error,JSON,Math,Date,RegExp,Symbol,Buffer,setTimeout,setInterval,fetch,AbortController,AbortSignal'.split(','));
 
-const BUILTINS = new Set([
-  'console','process','Promise','Array','Object','String','Number','Boolean',
-  'Map','Set','Error','JSON','Math','Date','RegExp','Symbol','Buffer',
-  'setTimeout','setInterval','clearTimeout','clearInterval','fetch',
-  'parseInt','parseFloat','isNaN','Infinity','NaN','globalThis','window',
-  'document','AbortController','AbortSignal','EventEmitter','ReadableStream',
-]);
-
-function highlightLine(text: string): JSX.Element[] {
-  const tokens: JSX.Element[] = [];
-  // Regex: strings → comments → numbers → keywords/identifiers → operators → rest
-  const re = /(\/\/.*$|\/\*[\s\S]*?\*\/)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+\.?\d*\b)|(\b[a-zA-Z_$][\w$]*\b)|(=>|\.\.\.|\?\.|&&|\|\||[!=]==?|[<>]=?|[+\-*/%]=?|[{}()[\];:,.])|(\s+)/g;
-  let match: RegExpExecArray | null;
-  let lastIndex = 0;
-  let key = 0;
-
-  while ((match = re.exec(text)) !== null) {
-    // Gap before match
-    if (match.index > lastIndex) {
-      tokens.push(<span key={key++}>{text.slice(lastIndex, match.index)}</span>);
-    }
-    const [full, comment, str, num, ident, op, ws] = match;
-
-    if (comment) {
-      tokens.push(<span key={key++} style={{ color: '#5c6370', fontStyle: 'italic' }}>{full}</span>);
-    } else if (str) {
-      tokens.push(<span key={key++} style={{ color: '#98c379' }}>{full}</span>);
-    } else if (num) {
-      tokens.push(<span key={key++} style={{ color: '#d19a66' }}>{full}</span>);
-    } else if (ident) {
-      if (KEYWORDS.has(ident)) {
-        tokens.push(<span key={key++} style={{ color: '#c678dd' }}>{full}</span>);
-      } else if (BUILTINS.has(ident)) {
-        tokens.push(<span key={key++} style={{ color: '#e5c07b' }}>{full}</span>);
-      } else if (/^[A-Z]/.test(ident)) {
-        tokens.push(<span key={key++} style={{ color: '#e5c07b' }}>{full}</span>);
-      } else {
-        tokens.push(<span key={key++} style={{ color: '#e0e0e0' }}>{full}</span>);
-      }
-    } else if (op) {
-      tokens.push(<span key={key++} style={{ color: '#56b6c2' }}>{full}</span>);
-    } else {
-      tokens.push(<span key={key++}>{full}</span>);
-    }
-    lastIndex = re.lastIndex;
+function hl(text: string): JSX.Element[] {
+  const out: JSX.Element[] = [];
+  const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+\.?\d*\b)|(\b[a-zA-Z_$][\w$]*\b)|(=>|\.\.\.|\?\.|&&|\|\||[!=]==?|[<>]=?|[{}()[\];:,.])|(\s+)/g;
+  let m: RegExpExecArray | null, last = 0, k = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(<span key={k++}>{text.slice(last, m.index)}</span>);
+    const [full, cmt, str, num, id] = m;
+    const c = cmt ? '#5c6370' : str ? '#98c379' : num ? '#d19a66'
+      : id ? (KW.has(id) ? '#c678dd' : BI.has(id) || /^[A-Z]/.test(id) ? '#e5c07b' : '#abb2bf') : '#56b6c2';
+    out.push(<span key={k++} style={{ color: c, ...(cmt ? { fontStyle: 'italic' as const } : {}) }}>{full}</span>);
+    last = re.lastIndex;
   }
-  if (lastIndex < text.length) {
-    tokens.push(<span key={key++}>{text.slice(lastIndex)}</span>);
-  }
-  return tokens;
+  if (last < text.length) out.push(<span key={k++}>{text.slice(last)}</span>);
+  return out;
 }
 
 /* ─── Component ─── */
 
 export default function SourceReader({
-  code,
-  filename,
-  language = 'typescript',
-  startLine = 1,
-  highlights = [],
-  githubUrl,
+  code, filename, language = 'typescript', startLine = 1, highlights = [], githubUrl,
 }: SourceReaderProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [activeNote, setActiveNote] = useState<number | null>(null);
-
   const lines = useMemo(() => code.replace(/\n$/, '').split('\n'), [code]);
-  const highlightMap = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const h of highlights) m.set(h.line, h.note);
-    return m;
-  }, [highlights]);
-
-  const toggleNote = useCallback((lineNum: number) => {
-    setActiveNote(prev => prev === lineNum ? null : lineNum);
-  }, []);
+  const hlMap = useMemo(() => new Map(highlights.map(h => [h.line, h.note])), [highlights]);
+  const toggleNote = useCallback((n: number) => setActiveNote(p => p === n ? null : n), []);
 
   return (
     <div style={{
-      margin: '1.5rem 0',
-      borderRadius: 10,
-      border: '1px solid var(--border, #2a2a3a)',
-      background: '#1a1a2e',
-      overflow: 'hidden',
-      fontFamily: "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace",
-      fontSize: '0.8125rem',
-      lineHeight: 1.5,
+      margin: '1.5rem 0', borderRadius: 8, overflow: 'hidden',
+      border: '1px solid var(--border, #2a2a3a)', background: 'var(--bg-card, #1e1e2e)',
     }}>
-      {/* ── Header ── */}
-      <div
-        onClick={() => setCollapsed(!collapsed)}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          padding: '9px 14px',
-          background: '#141428',
-          borderBottom: collapsed ? 'none' : '1px solid var(--border, #2a2a3a)',
-          cursor: 'pointer',
-          userSelect: 'none',
-        }}
-      >
-        {/* Traffic lights */}
-        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-          <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ff5f57' }} />
-          <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#febc2e' }} />
-          <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#28c840' }} />
+      {/* Header */}
+      <div onClick={() => setCollapsed(!collapsed)} style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '7px 14px', cursor: 'pointer', userSelect: 'none',
+        background: 'rgba(255,255,255,0.02)', borderBottom: collapsed ? 'none' : '1px solid var(--border, #2a2a3a)',
+      }}>
+        <div style={{ display: 'flex', gap: 5 }}>
+          <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#ff5f57' }} />
+          <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#febc2e' }} />
+          <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#28c840' }} />
         </div>
-        <span style={{ color: 'var(--text-muted, #6a6a80)', fontSize: '0.75rem', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {filename}
-        </span>
-        {githubUrl && (
-          <a
-            href={githubUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={e => e.stopPropagation()}
-            style={{ color: 'var(--text-muted)', fontSize: '0.6875rem', textDecoration: 'none', opacity: 0.7 }}
-          >
-            GitHub ↗
-          </a>
-        )}
-        <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem', transition: 'transform 0.2s', transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }}>
-          ▾
-        </span>
+        <span style={{ flex: 1, color: 'var(--text-muted)', fontSize: '0.75rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: "'JetBrains Mono', monospace" }}>{filename}</span>
+        {githubUrl && <a href={githubUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'var(--text-muted)', fontSize: '0.6875rem', textDecoration: 'none', opacity: 0.6 }}>GitHub ↗</a>}
+        <span style={{ color: 'var(--text-muted)', fontSize: '0.7rem', transition: 'transform 0.2s', transform: collapsed ? 'rotate(-90deg)' : '' }}>▾</span>
       </div>
 
-      {/* ── Code body ── */}
+      {/* Code */}
       {!collapsed && (
-        <div style={{ overflowX: 'auto', padding: '10px 0' }}>
-          <table style={{ borderCollapse: 'collapse', width: '100%', tableLayout: 'auto' }}>
-            <tbody>
+        <div style={{ overflowX: 'auto' }}>
+          <pre style={{
+            margin: 0, padding: '0.75rem 0', background: 'transparent',
+            fontFamily: "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace",
+            fontSize: '0.8125rem', lineHeight: 1.6, border: 'none',
+          }}>
+            <code>
               {lines.map((line, i) => {
-                const lineNum = startLine + i;
-                const isHighlighted = highlightMap.has(lineNum);
-                const isActive = activeNote === lineNum;
-                const note = highlightMap.get(lineNum);
-
+                const num = startLine + i;
+                const isHl = hlMap.has(num);
+                const isActive = activeNote === num;
+                const note = hlMap.get(num);
                 return (
                   <React.Fragment key={i}>
-                    <tr
-                      onClick={isHighlighted ? () => toggleNote(lineNum) : undefined}
+                    <div
+                      onClick={isHl ? () => toggleNote(num) : undefined}
                       style={{
-                        background: isHighlighted
-                          ? isActive ? 'rgba(217, 119, 87, 0.12)' : 'rgba(217, 119, 87, 0.06)'
-                          : 'transparent',
-                        cursor: isHighlighted ? 'pointer' : 'default',
-                        borderLeft: isHighlighted ? '3px solid var(--accent, #D97757)' : '3px solid transparent',
+                        display: 'flex', padding: '0 14px 0 0',
+                        background: isHl ? (isActive ? 'rgba(217,119,87,0.12)' : 'rgba(217,119,87,0.06)') : 'transparent',
+                        borderLeft: isHl ? '3px solid var(--accent, #D97757)' : '3px solid transparent',
+                        cursor: isHl ? 'pointer' : 'default',
                       }}
                     >
-                      <td style={{
-                        width: 1,
-                        paddingLeft: 14,
-                        paddingRight: 12,
-                        textAlign: 'right',
-                        userSelect: 'none',
-                        color: isHighlighted ? 'var(--accent, #D97757)' : 'var(--text-muted, #6a6a80)',
-                        opacity: isHighlighted ? 1 : 0.5,
-                        fontSize: '0.75rem',
-                        verticalAlign: 'top',
-                        whiteSpace: 'nowrap',
-                      }}>
-                        {lineNum}
-                      </td>
-                      <td style={{ paddingRight: 16, whiteSpace: 'pre' }}>
-                        {highlightLine(line)}
-                      </td>
-                    </tr>
-                    {/* Annotation popover */}
+                      <span style={{
+                        display: 'inline-block', width: 45, textAlign: 'right', paddingRight: 12, flexShrink: 0,
+                        color: isHl ? 'var(--accent, #D97757)' : 'var(--text-muted)', opacity: isHl ? 0.9 : 0.4,
+                        fontSize: '0.75rem', userSelect: 'none',
+                      }}>{num}</span>
+                      <span>{hl(line)}</span>
+                    </div>
                     {isActive && note && (
-                      <tr>
-                        <td colSpan={2} style={{ padding: 0 }}>
-                          <div style={{
-                            margin: '0 14px 6px 40px',
-                            padding: '8px 12px',
-                            borderRadius: 6,
-                            background: 'rgba(217, 119, 87, 0.08)',
-                            border: '1px solid rgba(217, 119, 87, 0.2)',
-                            color: 'var(--text-secondary, #b0b0c0)',
-                            fontSize: '0.8125rem',
-                            fontFamily: "'DM Sans', system-ui, sans-serif",
-                            lineHeight: 1.5,
-                          }}>
-                            <span style={{ color: 'var(--accent, #D97757)', fontWeight: 600, marginRight: 6 }}>→</span>
-                            {note}
-                          </div>
-                        </td>
-                      </tr>
+                      <div style={{
+                        margin: '2px 14px 4px 60px', padding: '6px 10px', borderRadius: 5,
+                        background: 'rgba(217,119,87,0.08)', border: '1px solid rgba(217,119,87,0.18)',
+                        color: 'var(--text-secondary, #b0b0c0)', fontSize: '0.8rem',
+                        fontFamily: "'DM Sans', system-ui, sans-serif", lineHeight: 1.4,
+                      }}>
+                        <span style={{ color: 'var(--accent)', fontWeight: 600, marginRight: 5 }}>→</span>{note}
+                      </div>
                     )}
                   </React.Fragment>
                 );
               })}
-            </tbody>
-          </table>
+            </code>
+          </pre>
         </div>
       )}
     </div>
   );
 }
-
-import React from 'react';
