@@ -1,0 +1,19 @@
+{
+  "name": "@pi-tutorial/demo-10-control",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "01": "npx tsx src/01-no-control.ts",
+    "02": "npx tsx src/02-harness.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@pi-tutorial/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "tsx": "^4.19.0"
+  }
+}
