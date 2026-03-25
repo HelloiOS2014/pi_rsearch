@@ -1,0 +1,338 @@
+---
+title: "记忆与注意力"
+chapter: 12
+description: "如何让 Agent 跨越上下文窗口的限制：记忆层次、成本反转、压缩策略、会话持久化"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+
+export const codeSessionEntryTypes = `// Pi 会话的 9 种 Entry 类型 — 统一的树形数据模型
+export type SessionEntry =
+  | SessionMessageEntry        // "message"       — 用户/助手/工具消息
+  | CompactionEntry            // "compaction"     — 压缩摘要（替代被丢弃的历史）
+  | BranchSummaryEntry         // "branch_summary" — 分支摘要（离开分支时生成）
+  | CustomMessageEntry         // "custom_message" — 扩展注入的消息（参与 LLM 上下文）
+  | ThinkingLevelChangeEntry   // "thinking_level_change" — 推理强度切换
+  | ModelChangeEntry           // "model_change"   — 模型切换
+  | LabelEntry                 // "label"          — 用户书签
+  | SessionInfoEntry           // "session_info"   — 会话元数据（名称等）
+  | CustomEntry;               // "custom"         — 扩展私有数据（不参与上下文）
+
+// 每个 Entry 的基础结构 — id/parentId 构成树
+export interface SessionEntryBase {
+  type: string;
+  id: string;            // 8 位 hex，碰撞检查
+  parentId: string | null; // 指向父节点，null = 根
+  timestamp: string;
+}`;
+
+export const codeBranchMechanism = `// branch() — 分支的全部实现：移动叶指针
+branch(branchFromId: string): void {
+  if (!this.byId.has(branchFromId)) {
+    throw new Error(\`Entry \${branchFromId} not found\`);
+  }
+  this.leafId = branchFromId;
+  // 就这么多。没有复制，没有删除。
+  // 下一次 appendXXX() 会自动成为这个节点的子节点，
+  // 形成新分支。旧分支的所有 Entry 原封不动。
+}
+
+// branchWithSummary() — 分支 + 离开摘要
+branchWithSummary(branchFromId: string | null, summary: string): string {
+  this.leafId = branchFromId;
+  const entry: BranchSummaryEntry = {
+    type: "branch_summary",
+    id: generateId(this.byId),
+    parentId: branchFromId,
+    timestamp: new Date().toISOString(),
+    fromId: branchFromId ?? "root",
+    summary,
+  };
+  this._appendEntry(entry);
+  return entry.id;
+}`;
+
+export const codeCutPoint = `// findCutPoint — 从最新消息向前回溯，保留 keepRecentTokens
+export function findCutPoint(
+  entries: SessionEntry[],
+  startIndex: number,
+  endIndex: number,
+  keepRecentTokens: number,
+): CutPointResult {
+  const cutPoints = findValidCutPoints(entries, startIndex, endIndex);
+  if (cutPoints.length === 0) {
+    return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
+  }
+
+  let accumulatedTokens = 0;
+  let cutIndex = cutPoints[0];
+
+  // 从尾部向头部走，累加 token 估算
+  for (let i = endIndex - 1; i >= startIndex; i--) {
+    const entry = entries[i];
+    if (entry.type !== "message") continue;
+    const messageTokens = estimateTokens(entry.message);
+    accumulatedTokens += messageTokens;
+
+    // 超出预算 → 找最近的合法切割点
+    if (accumulatedTokens >= keepRecentTokens) {
+      for (let c = 0; c < cutPoints.length; c++) {
+        if (cutPoints[c] >= i) { cutIndex = cutPoints[c]; break; }
+      }
+      break;
+    }
+  }
+  // 永远不在 toolResult 处切割 — 它必须跟在 tool call 后面
+  return { firstKeptEntryIndex: cutIndex, turnStartIndex, isSplitTurn };
+}`;
+
+export const codeCompactionPrompt = `// SUMMARIZATION_PROMPT — 结构化摘要模板
+const SUMMARIZATION_PROMPT = \`Create a structured context checkpoint summary
+that another LLM will use to continue the work.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish?]
+
+## Constraints & Preferences
+- [Any constraints mentioned by user]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+### In Progress
+- [ ] [Current work]
+### Blocked
+- [Issues preventing progress]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Data, file paths, error messages needed to continue]
+
+Keep each section concise.
+Preserve exact file paths, function names, and error messages.\`;`;
+
+export const codeTokenEstimate = `// estimateTokens — chars/4 启发式，覆盖所有消息类型
+export function estimateTokens(message: AgentMessage): number {
+  let chars = 0;
+  switch (message.role) {
+    case "user": {
+      const content = message.content;
+      if (typeof content === "string") chars = content.length;
+      else if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === "text" && block.text) chars += block.text.length;
+        }
+      }
+      return Math.ceil(chars / 4);  // 保守估算（略偏高）
+    }
+    case "assistant": {
+      for (const block of message.content) {
+        if (block.type === "text") chars += block.text.length;
+        else if (block.type === "thinking") chars += block.thinking.length;
+        else if (block.type === "toolCall")
+          chars += block.name.length + JSON.stringify(block.arguments).length;
+      }
+      return Math.ceil(chars / 4);
+    }
+    case "toolResult": {
+      // 图片特殊处理：每张 ~1200 tokens
+      for (const block of message.content) {
+        if (block.type === "text") chars += block.text.length;
+        if (block.type === "image") chars += 4800;
+      }
+      return Math.ceil(chars / 4);
+    }
+  }
+  return 0;
+}`;
+
+export const codeKeepExpensive = `// "保留"策略 — 传统做法：全量历史常驻上下文
+const context = [
+  systemPrompt,          // ~2,000 tokens
+  ...allHistoryMessages, // 不断增长...
+  // 第 20 轮：~50,000 tokens 历史
+  // 第 40 轮：~120,000 tokens 历史
+  // 第 60 轮：context window 满了
+  //           质量崩塌，开始重复读文件
+  userMessage,
+];
+
+// 问题 1：token 成本线性增长 O(n²)
+// 问题 2："lost in the middle" — 中间信息被忽略
+// 问题 3：终端关闭 = 全部丢失`;
+
+export const codeFetchCheap = `// "取回"策略 — Pi 的做法：压缩 + 按需重读
+const context = [
+  systemPrompt,           // ~2,000 tokens
+  compactionSummary,      // ~800 tokens（压缩了 50,000 tokens 的历史）
+  ...recentMessages,      // 只保留最近 ~20,000 tokens
+  userMessage,
+];
+
+// 需要旧文件内容？一次 read 工具调用取回
+// 需要旧决策？摘要里有 Key Decisions
+// 需要文件清单？摘要附带 readFiles/modifiedFiles
+
+// token 成本恒定 O(1)
+// 质量稳定（注意力集中在最近的消息上）
+// 终端关闭？Session 文件已持久化，随时恢复`;
+
+## Agent 忘了之前做的事
+
+> 周二上午，你启动 Agent，让它重构一个中等规模的 TypeScript 项目——把 12 个文件中的旧版 API 调用迁移到新 SDK。
+>
+> **前 20 分钟**，一切顺利。Agent 逐个文件分析、修改，已经处理了 7 个文件。你靠在椅背上，觉得今天的活儿快完了。
+>
+> **第 25 分钟**，你注意到终端里出现了奇怪的输出——Agent 正在 `read` 一个它 10 分钟前刚读过并修改完的文件。你翻了一下输出，发现它不记得自己改过这个文件了。Context Window 的使用率显示 95%。
+>
+> **第 30 分钟**，情况更糟。Agent 开始重复 15 分钟前已经做过的工作——重新分析已经迁移完的文件，尝试第二次迁移同一个 API 调用。你看着它生成了一个和 15 分钟前几乎一模一样的 diff，但这次因为文件已经被改过了，diff 当然匹配不上。编辑失败。Agent 困惑地重试了三遍。
+>
+> 你检查了一下状态：Context Window 95% 满，但质量已经崩塌了。不是因为 Agent 变笨了——是因为早期的关键上下文（"哪些文件已经处理过"、"每个文件的迁移状态"）被挤到了 128K 窗口的中间地带，变成了注意力的盲区。
+>
+> **第 35 分钟**，你家的猫跳上键盘。终端关闭了。
+>
+> 你重新打开终端，重新启动 Agent。它礼貌地跟你打了个招呼——像是第一次见面。它不记得已经改了 7 个文件，不记得哪些 API 已经迁移，不记得你们之间关于边界情况的讨论。
+>
+> 所有进度归零。你只能从头来过。
+>
+> **你的 Agent 有行动力，但没有记忆力。**
+
+---
+
+## 为什么会痛：状态鸿沟与注意力鸿沟
+
+回顾 Ch9 的理论框架，这一章的痛点可以精确地映射到两条鸿沟。
+
+**状态鸿沟：LLM 是无状态函数。** 每次调用都是一次独立的 `f(context) → response`。上一次调用的"记忆"完全依赖你在 context 中放了什么。关闭终端 = 丢失 context = 丢失所有状态。没有任何东西是"自动记住"的——记忆完全是 Harness 的工程责任。
+
+**注意力鸿沟：窗口有限，注意力有偏。** 即使上下文没满，LLM 的注意力分布也不均匀。研究表明存在 "lost in the middle" 现象——窗口头尾的信息被重点关注，中间的信息容易被忽略。当 Context Window 接近满载时，这个问题更加严重：质量在窗口填满之前就已经开始退化了。
+
+这两条鸿沟引出了本章的**中心轴线**——成本反转原理在记忆领域的具体展开：
+
+**在 LLM 上下文中，保留是昂贵的，取回是廉价的。** 每一个常驻上下文的 token 都在消耗注意力预算、推高推理成本、挤压新信息的空间。而一次工具调用（`read`、`grep`、`glob`）只需要毫秒级延迟和极低的 token 开销。传统计算机科学里"cache everything"的直觉，在 LLM 世界中是反模式。
+
+---
+
+## 记忆层次结构
+
+就像 CPU 有 L1/L2/L3 缓存和主存，Agent 的记忆也有层次。每一层的延迟、容量和持久性不同，对应不同的工程策略。
+
+| 层级 | 名称 | 载体 | 容量 | 持久性 | 延迟 | Pi 实现 |
+|------|------|------|------|--------|------|---------|
+| **L1** | 工作记忆 | Context Window 中的最近消息 | ~20K tokens | 单 turn | 0 | `keepRecentTokens: 20000` |
+| **L2** | 压缩记忆 | Compaction Summary | ~800 tokens | 跨 turn（同会话） | 0 | `CompactionEntry.summary` |
+| **L3** | 持久记忆 | Session 文件（JSONL 树） | 无限 | 跨重启 | 1 次 read | `SessionManager` |
+| **L4** | 外部记忆 | 文件系统、git、CLAUDE.md | 无限 | 跨会话 | 1 次工具调用 | `read`/`glob`/`bash` 工具 |
+
+关键数据：Pichay 等人的研究 (2025) 在大规模 Agent 工作流中测量到 **21.8% 的上下文空间被浪费的历史消息占据**，而 token 放大率（实际消耗 / 有效信息量）高达 **84.4x**。这意味着 Agent 每处理 1 token 的有效信息，就要为 84 token 的冗余上下文买单。
+
+这组数据证明了记忆层次结构不是优化——是生存需求。没有压缩和分层，Agent 在复杂任务中根本无法高效运作。
+
+---
+
+## 成本反转全景：保留 vs 取回的每一个决策
+
+Ch9 提出了成本反转原理的总体框架。在记忆与注意力领域，这个原理变得具体而可操作——Harness 设计者在每一个子系统中都需要在"保留"和"取回"之间做出选择。
+
+<CodeComparison client:visible
+  left={{ code: codeKeepExpensive, label: "保留（昂贵）", language: "typescript" }}
+  right={{ code: codeFetchCheap, label: "取回（廉价）", language: "typescript" }}
+/>
+
+下表展示了 Pi 在每个维度上的具体决策：
+
+| 维度 | "保留"策略（昂贵） | "取回"策略（廉价） | Pi 的选择 |
+|------|-------------------|-------------------|-----------|
+| **历史消息** | 全量保留在 context 中 | Compaction 摘要 + keepRecentTokens | 取回：只保留最近 20K tokens，其余压缩为 ~800 token 摘要 |
+| **工具结果** | 大段输出原样保留 | 截断 + 按需重读 | 取回：`truncateHead` 50KB / `truncateTail` 100KB，超出部分丢弃 |
+| **Thinking** | 推理过程全量保留 | 仅保留结论 | 取回：thinking block 不参与后续上下文（API 层面已过滤） |
+| **文件内容** | 预加载所有相关文件 | `read` 工具按需读取 | 取回：从不预加载，Agent 自行决定何时读取 |
+| **子任务上下文** | 全部在主 Agent context 中 | 子 Agent 隔离执行，只返回摘要 | 取回：subagent 模式隔离上下文，仅回传结果 |
+
+**每一行的默认选择都是"取回"。** 这不是偶然——这是成本反转原理的直接推论。在 LLM 上下文中，空间 = 注意力 = 质量。节省空间就是提升质量。
+
+---
+
+## 三种压缩策略
+
+当上下文不可避免地增长时，如何压缩？业界收敛到三种策略，各有优劣。
+
+| 策略 | 原理 | 信息保真度 | 实现复杂度 | 代表 |
+|------|------|-----------|-----------|------|
+| **Token 清除** | 直接截断/删除旧消息 | 低（信息丢失） | 低 | 简单 FIFO 队列 |
+| **LLM 摘要** | 用 LLM 总结被丢弃的消息 | 中（结构化保留关键信息） | 中 | Pi Compaction、Claude Code |
+| **Observation 遮蔽** | 选择性隐藏工具输出，保留结构 | 高（对话骨架完整） | 高 | Factory.ai |
+
+Pi 选择了 **LLM 摘要**策略，并添加了三个关键增强：
+
+1. **结构化模板**：不是自由摘要，而是强制 Goal / Constraints / Progress / Decisions / Next Steps 格式（见上方 `codeCompactionPrompt`），确保关键信息不被遗漏。
+
+2. **增量更新**：第二次及以后的压缩不从零开始——它接收上一次的摘要作为 `<previous-summary>`，用 `UPDATE_SUMMARIZATION_PROMPT` 合并新信息。这避免了反复压缩导致的信息衰减。
+
+3. **文件操作追踪**：每次压缩自动提取并附加 `readFiles` / `modifiedFiles` 列表，让 Agent 在压缩后仍然知道哪些文件被读过、哪些被改过——这是最容易在压缩中丢失的信息。
+
+<SourceReader client:visible
+  filename="core/compaction/compaction.ts"
+  language="typescript"
+  code={codeCompactionPrompt}
+  highlights={[
+    { line: 5, note: "Goal — 用户在做什么" },
+    { line: 8, note: "Constraints — 不要丢失用户的偏好" },
+    { line: 11, note: "Progress — 结构化的任务跟踪，Done/InProgress/Blocked" },
+    { line: 18, note: "Key Decisions — 带 rationale，避免 Agent 重复讨论已决定的事" },
+    { line: 21, note: "Next Steps — 有序列表，Agent 恢复后知道该做什么" },
+  ]}
+/>
+
+Factory.ai 的研究数据提供了一个有用的参照：他们报告 **37% 的跨会话上下文保留率**——也就是说，在没有持久记忆的情况下，Agent 跨会话只能保留约三分之一的有效信息。这个数字说明了为什么"重启 = 归零"不只是体验问题，而是效率问题。
+
+---
+
+## 会话持久化与分支
+
+解决"关闭终端 = 丢失一切"的方法听起来简单——把对话存下来。但一旦你支持"分支"（用户从历史中某个点重新出发），简单的数组就不够用了。
+
+**Pi 的方案：把会话存为一棵树。** 这不是比喻——它的数据模型就是 git 的简化版。
+
+<SourceReader client:visible
+  filename="core/session-manager.ts"
+  language="typescript"
+  code={codeSessionEntryTypes}
+  highlights={[
+    { line: 2, note: "9 种 Entry 类型，覆盖消息、压缩、分支、扩展的所有需求" },
+    { line: 14, note: "每个 Entry 都有 id + parentId — 不是数组，是树" },
+    { line: 15, note: "id: 8 位 hex，碰撞检查生成" },
+    { line: 16, note: "parentId: 指向父节点。null = 根节点" },
+  ]}
+/>
+
+这个设计带来了三个关键能力：
+
+**1. 分支 = 移动指针。** 创建分支不需要复制任何数据。`branch()` 的全部实现就是 `this.leafId = branchFromId`——一行代码。旧分支的所有 Entry 原封不动，新消息自动成为新分支。
+
+<SourceReader client:visible
+  filename="core/session-manager.ts"
+  language="typescript"
+  code={codeBranchMechanism}
+  highlights={[
+    { line: 3, note: "验证节点存在" },
+    { line: 5, note: "全部实现：移动叶指针。没有复制，没有删除。" },
+    { line: 12, note: "branchWithSummary — 分支时自动总结被离开的路径" },
+  ]}
+/>
+
+**2. Append-only 持久化。** Session 文件是 JSONL 格式——每一行是一个 JSON 对象，新 Entry 直接 append 到文件末尾。没有 update，没有 delete。这意味着即使进程崩溃，已写入的数据也不会损坏。
+
+**3. 上下文重建 = 从叶到根的路径遍历。** `buildSessionContext()` 从当前叶节点向根节点回溯，收集路径上的所有 Entry，就像 `git log` 从 HEAD 沿 parent 指针回溯。分支、压缩、模型切换——所有历史事件都在路径上以 Entry 的形式存在。
+
+ContextBranch (Becker et al., 2025) 的研究验证了这种树形结构的价值：在复杂推理任务中，支持分支的 Agent 比线性历史的 Agent 在 Reasoning Depth 上高出 **40%**——因为分支让 Agent 能够探索多条路径而不丢失之前的上下文。
+
+---
