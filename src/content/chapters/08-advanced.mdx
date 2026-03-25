@@ -4,7 +4,7 @@ chapter: 8
 description: "扩展系统、TUI/Web UI 架构、Skills、产品化考量"
 ---
 import SourceReader from '../../components/tutorial/SourceReader';
-import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
+import ExtensionArchDiagram from '../../components/tutorial/ExtensionArchDiagram';
 
 export const extensionEventTypesCode = `/** Union of all event types */
 export type ExtensionEvent =
@@ -296,13 +296,7 @@ pi.on("tool_call", (event, ctx) => {
 
 用户使用：`pi --audit-mode --audit-output=/tmp/audit.log`
 
-  <VideoEmbed
-  client:visible
-  compositionId="ExtensionArch"
-  title="V26: 扩展系统全景"
-  description="扩展加载、事件处理、工具注册、资源注入的完整流程动画"
-  duration="15s"
-/>
+<ExtensionArchDiagram client:visible />
 
 ---
 

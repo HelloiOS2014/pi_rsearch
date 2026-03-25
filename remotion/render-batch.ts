@@ -22,17 +22,10 @@ const COMPOSITIONS = [
   "WhatIsAgent",
   "PiArchOverview",
   "LoopAnimation",
-  "ToolCallFlow",
-  "EventTimeline",
   "ProviderAbstract",
-  "FullArchitecture",
-  "FrameworkCompare",
-  "ExtensionArch",
-  "HarnessGaps",
   "MessageRouting",
   "EditMatching",
   "MemoryHierarchy",
-  "ConfigMerge",
   "DeliveryFanout",
 ];
 

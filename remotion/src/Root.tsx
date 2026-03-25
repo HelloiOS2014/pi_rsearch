@@ -6,17 +6,10 @@ import { CourseIntro } from "./sequences/00-intro/CourseIntro";
 import { WhatIsAgent } from "./sequences/01-panorama/WhatIsAgent";
 import { PiArchOverview } from "./sequences/01-panorama/PiArchOverview";
 import { LoopAnimation } from "./sequences/02-core-loop/LoopAnimation";
-import { ToolCallFlow } from "./sequences/03-tool-system/ToolCallFlow";
-import { EventTimeline } from "./sequences/04-streaming/EventTimeline";
 import { ProviderAbstract } from "./sequences/05-multi-model/ProviderAbstract";
-import { FullArchitecture } from "./sequences/06-build-agent/FullArchitecture";
-import { FrameworkCompare } from "./sequences/07-comparison/FrameworkCompare";
-import { ExtensionArch } from "./sequences/08-advanced/ExtensionArch";
-import { HarnessGaps } from "./sequences/09-harness/HarnessGaps";
 import { MessageRouting } from "./sequences/10-control/MessageRouting";
 import { EditMatching } from "./sequences/11-trust/EditMatching";
 import { MemoryHierarchy } from "./sequences/12-memory/MemoryHierarchy";
-import { ConfigMerge } from "./sequences/13-adapt/ConfigMerge";
 import { DeliveryFanout } from "./sequences/14-deliver/DeliveryFanout";
 
 export const RemotionRoot: React.FC = () => {
@@ -94,26 +87,6 @@ export const RemotionRoot: React.FC = () => {
         height={1080}
       />
 
-      {/* V08: Tool Call Flow */}
-      <Composition
-        id="ToolCallFlow"
-        component={ToolCallFlow}
-        durationInFrames={450}
-        fps={30}
-        width={1920}
-        height={1080}
-      />
-
-      {/* V12: Event Timeline */}
-      <Composition
-        id="EventTimeline"
-        component={EventTimeline}
-        durationInFrames={450}
-        fps={30}
-        width={1920}
-        height={1080}
-      />
-
       {/* V15: Provider Abstraction */}
       <Composition
         id="ProviderAbstract"
@@ -124,39 +97,6 @@ export const RemotionRoot: React.FC = () => {
         height={1080}
       />
 
-      {/* V19: Full Architecture */}
-      <Composition
-        id="FullArchitecture"
-        component={FullArchitecture}
-        durationInFrames={600}
-        fps={30}
-        width={1920}
-        height={1080}
-      />
-
-      {/* V24: Framework Comparison */}
-      <Composition
-        id="FrameworkCompare"
-        component={FrameworkCompare}
-        durationInFrames={450}
-        fps={30}
-        width={1920}
-        height={1080}
-      />
-
-      {/* V26: Extension Architecture */}
-      <Composition
-        id="ExtensionArch"
-        component={ExtensionArch}
-        durationInFrames={450}
-        fps={30}
-        width={1920}
-        height={1080}
-      />
-
-      {/* V28: Harness Gaps */}
-      <Composition id="HarnessGaps" component={HarnessGaps} durationInFrames={300} fps={30} width={1920} height={1080} />
-
       {/* V29: Message Routing */}
       <Composition id="MessageRouting" component={MessageRouting} durationInFrames={300} fps={30} width={1920} height={1080} />
 
@@ -165,9 +105,6 @@ export const RemotionRoot: React.FC = () => {
 
       {/* V31: Memory Hierarchy */}
       <Composition id="MemoryHierarchy" component={MemoryHierarchy} durationInFrames={300} fps={30} width={1920} height={1080} />
-
-      {/* V32: Config Merge */}
-      <Composition id="ConfigMerge" component={ConfigMerge} durationInFrames={240} fps={30} width={1920} height={1080} />
 
       {/* V33: Delivery Fanout */}
       <Composition id="DeliveryFanout" component={DeliveryFanout} durationInFrames={240} fps={30} width={1920} height={1080} />

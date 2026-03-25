@@ -5,7 +5,7 @@ description: "整合前 5 章所有概念，构建完整可用的 coding agent"
 ---
 import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
-import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
+import FullArchitectureDiagram from '../../components/tutorial/FullArchitectureDiagram';
 
 export const codeBuildSystemPromptOptions = `export interface BuildSystemPromptOptions {
   /** Custom system prompt (replaces default). */
@@ -1050,13 +1050,7 @@ Pi 的 API Key 管理也值得一提。`AuthStorage` 使用文件锁（`proper-l
   ]}
 />
 
-  <VideoEmbed
-  client:visible
-  title="V19 · Agent 可靠性机制"
-  description="重试、溢出恢复、认证安全的完整流程动画"
-  duration="~30s"
-  compositionId="FullArchitecture"
-/>
+<FullArchitectureDiagram client:visible />
 
 ---
 

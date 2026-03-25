@@ -6,7 +6,7 @@ description: "理解 EventStream 双消费模式，完整事件生命周期，Pr
 
 import SourceReader from '../../components/tutorial/SourceReader';
 import CodeComparison from '../../components/tutorial/CodeComparison';
-import VideoEmbed from '../../components/tutorial/VideoEmbed.astro';
+import EventTimelineDiagram from '../../components/tutorial/EventTimelineDiagram';
 
 export const ch04Code1 = `export class EventStream<T, R = T> implements AsyncIterable<T> {
   private queue: T[] = [];
@@ -642,13 +642,7 @@ agent_start
 
 ### 完整时序图
 
-  <VideoEmbed
-  client:visible
-  title="V12 · Event Timeline"
-  description="AgentEvent 完整时序图 — 无工具调用 vs 有工具调用两种场景"
-  duration="~20s"
-  compositionId="EventTimeline"
-/>
+<EventTimelineDiagram client:visible />
 
 **场景 A：纯文本响应（无工具调用）**
 
