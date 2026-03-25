@@ -240,3 +240,75 @@ HumanLayer 的数据更具体地证明了这一点：Opus 4.6 在一种 Harness 
 - 当面临"改进 Harness"还是"切换模型"的选择时，记住新模型可能需要重新调整 Harness
 
 ---
+
+## Harness 的三大支柱
+
+五个鸿沟和成本反转是理论透镜——它们解释了 Harness **为什么**存在。但当你面对一个具体的 Harness 工程项目时，你需要的是实践层面的组织原则。Martin Fowler 分析了 OpenAI 如何用 Codex 构建百万行级代码库，从中提炼出三根支柱，定义了 Harness Engineering 的实践核心。
+
+### 支柱一：Context Engineering
+
+> "持续增强的代码库知识库，加上 Agent 访问动态上下文的能力（可观测性数据、浏览器导航等）。"
+> —— Martin Fowler (2026)
+
+Context Engineering 不是"把所有东西塞进上下文窗口"。Anthropic 给出了更精确的定义：
+
+> "找到最小的高信号 token 集合，最大化期望行为的概率——把上下文当作有限资源，具有递减边际收益。"
+> —— Anthropic (2025)
+
+两个概念让这件事变得具体：
+
+- **上下文腐烂（Context Rot）**：性能在上下文窗口填满之前就开始退化。你不需要等到 100% 才出问题——70% 时推理质量就已经在下降了。这是递减边际收益的直接后果。
+- **笨区（Dumb Zone）**（HumanLayer 的概念）：每多一个无关的工具描述、每多一条冗余的 MCP 响应，就把 Agent 往笨区推一步。更大的窗口不是解药——如果你用噪声填满更大的窗口，你只会得到一个更大的笨区。
+
+Context Engineering 的核心是**管理**这个有限资源——决定什么进入上下文、什么留在外面、什么需要压缩。这与成本反转原理一脉相承：默认按需取回，只有高信号 token 才值得常驻。
+
+### 支柱二：Architectural Constraints
+
+> "不仅由 LLM Agent 监控，还由确定性的自定义 linter 和结构化测试监控。"
+> —— Martin Fowler (2026)
+
+这里有一个反直觉的洞察：Harness 不仅仅是给 Agent 更多能力——它同时也**约束** Agent 的行动空间。Custom linter、命名约定、文件大小限制、Type checker——这些确定性工具缩小了 Agent 犯错的空间。
+
+这是"架构约束优于行为约束"的实践。不要在 prompt 里写"请不要破坏东西"——**构建让破坏变得不可能的结构**。确定性的 linter 比概率性的 prompt 可靠一万倍。当 Agent 的每一次写入都必须通过 type check 和 lint 才能提交，大量错误在产生的瞬间就被拦截了。
+
+### 支柱三：Entropy Management
+
+> "周期性运行的 Agent，用于发现文档不一致或架构约束违规。"
+> —— Martin Fowler (2026)
+
+当 Agent 持续修改代码库时，熵不可避免地增加——文档漂移、约定侵蚀、死代码堆积、命名风格分裂。Harness 需要"清扫 Agent"来周期性地恢复秩序。
+
+就像人类团队需要定期的重构冲刺一样，Agent 维护的代码库需要自动化的熵管理。这不是可选项——它是长期可持续性的前提。没有 Entropy Management 的 Harness，会在时间维度上缓慢崩溃。
+
+---
+
+## 方法论：怎么做 Harness Engineering
+
+理论告诉我们什么重要，支柱告诉我们关注什么。但当你坐下来，真正要**构建**或**改进**一个 Harness 时，你具体做什么？四个来自实践者的方法论。
+
+### 方法一：故障驱动迭代
+
+> "当 Agent 犯错时，把它当作信号——识别缺什么（工具？约束？文档？），然后补上。"
+> —— HumanLayer (2026)
+
+不要试图预先设计完美的 Harness。从最小可用版本开始。让**失败**告诉你该添加什么。每一次故障都是一个信号，精确地指向一个 Harness 缺口。这是最实用的方法论——从第一天就可以开始用。
+
+### 方法二：Working Backwards
+
+> "Behavior we want (or want to fix) → Harness Design to help the model achieve this."
+> —— LangChain (2026)
+
+从期望的 Agent 行为出发，反向推导需要什么 Harness 设计才能产生这种行为。这与"我们能加什么功能？"是相反的思路——你应该问的是"我们要什么结果？"。结果导向，而非功能堆砌。
+
+### 方法三：先减后加
+
+不要一上来就添加更多工具、更多配置、更多指令。**先削减到能工作的最小集合**。观察失败模式。然后针对性地添加修复。Vercel 证明了：2 个工具可以打败 15 个工具。减法先于加法——这与简化轨迹和成本反转原理完全一致。
+
+### 方法四："Skill Issue" 操作原则
+
+> "The model is probably fine. It's just a skill issue."
+> —— HumanLayer (2026)
+
+当 Agent 失败时，抑制住"换个更大的模型"的冲动。几乎每一次，修复都在 Harness 层——更好的工具、更好的配置、更好的上下文。HumanLayer 的数据证明了这一点：Opus 4.6 仅靠更换 Harness 就从 #33 跃升到 #5。模型没问题，是你的 Harness 还不够好。
+
+---
