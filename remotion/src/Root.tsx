@@ -12,6 +12,12 @@ import { ProviderAbstract } from "./sequences/05-multi-model/ProviderAbstract";
 import { FullArchitecture } from "./sequences/06-build-agent/FullArchitecture";
 import { FrameworkCompare } from "./sequences/07-comparison/FrameworkCompare";
 import { ExtensionArch } from "./sequences/08-advanced/ExtensionArch";
+import { HarnessGaps } from "./sequences/09-harness/HarnessGaps";
+import { MessageRouting } from "./sequences/10-control/MessageRouting";
+import { EditMatching } from "./sequences/11-trust/EditMatching";
+import { MemoryHierarchy } from "./sequences/12-memory/MemoryHierarchy";
+import { ConfigMerge } from "./sequences/13-adapt/ConfigMerge";
+import { DeliveryFanout } from "./sequences/14-deliver/DeliveryFanout";
 
 export const RemotionRoot: React.FC = () => {
   return (
@@ -147,6 +153,24 @@ export const RemotionRoot: React.FC = () => {
         width={1920}
         height={1080}
       />
+
+      {/* V28: Harness Gaps */}
+      <Composition id="HarnessGaps" component={HarnessGaps} durationInFrames={300} fps={30} width={1920} height={1080} />
+
+      {/* V29: Message Routing */}
+      <Composition id="MessageRouting" component={MessageRouting} durationInFrames={300} fps={30} width={1920} height={1080} />
+
+      {/* V30: Edit Matching */}
+      <Composition id="EditMatching" component={EditMatching} durationInFrames={240} fps={30} width={1920} height={1080} />
+
+      {/* V31: Memory Hierarchy */}
+      <Composition id="MemoryHierarchy" component={MemoryHierarchy} durationInFrames={300} fps={30} width={1920} height={1080} />
+
+      {/* V32: Config Merge */}
+      <Composition id="ConfigMerge" component={ConfigMerge} durationInFrames={240} fps={30} width={1920} height={1080} />
+
+      {/* V33: Delivery Fanout */}
+      <Composition id="DeliveryFanout" component={DeliveryFanout} durationInFrames={240} fps={30} width={1920} height={1080} />
     </>
   );
 };

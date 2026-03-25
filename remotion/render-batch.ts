@@ -28,6 +28,12 @@ const COMPOSITIONS = [
   "FullArchitecture",
   "FrameworkCompare",
   "ExtensionArch",
+  "HarnessGaps",
+  "MessageRouting",
+  "EditMatching",
+  "MemoryHierarchy",
+  "ConfigMerge",
+  "DeliveryFanout",
 ];
 
 async function main() {
