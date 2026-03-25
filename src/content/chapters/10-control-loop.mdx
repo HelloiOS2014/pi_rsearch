@@ -166,3 +166,125 @@ private async _checkCompaction(assistantMessage: AssistantMessage) {
 Pi 如何解决这些问题？答案就在 `AgentSession` 这个类里——它是 Agent 的神经系统，将感知、决策和执行编织成一个完整的控制回路。接下来，我们一层一层地拆开它。
 
 ---
+
+## 业界怎么解决
+
+### Agent Orchestrator 模式
+
+如果你有 Web 开发背景，理解 Orchestrator 最快的方式是类比应用服务器：
+
+- **AgentLoop** ≈ 你写的应用代码（业务逻辑、路由处理）
+- **Orchestrator** ≈ Tomcat / Express / Kestrel（生命周期、线程管理、中间件管道）
+
+应用代码负责"做什么"，应用服务器负责"怎么活着"。Agent Orchestrator 的角色完全一致——它不参与推理，但它确保推理能可靠地发生。
+
+一个完整的 Orchestrator 承担七项核心职责：
+
+1. **生命周期管理** — 初始化、运行、暂停、恢复、优雅关闭
+2. **事件分发** — Agent 事件路由到持久化、UI、扩展等消费者
+3. **上下文组装** — system prompt + 历史消息 + 注入内容 → LLM 输入
+4. **请求协调** — steering / follow-up / custom context 消息队列
+5. **控制与守卫** — 停止条件、循环检测、权限评估、预算管控
+6. **错误恢复** — 重试策略、溢出恢复、优雅降级
+7. **可观测性** — 事件流设计、诊断、统计
+
+不是每个产品都实现全部七项。它们在这条光谱上的位置，反映了截然不同的设计哲学。
+
+### 设计光谱：从极薄到极厚
+
+| 产品 | Orchestrator 厚度 | 为什么这么选 |
+|------|------------------|-------------|
+| **Vercel AI SDK** | 极薄 | SDK 哲学——提供原语，用户自己组装 |
+| **Pi** | 中等（~3,180 行 AgentSession） | 极简哲学——够用就好，"The One Rule: 理解每一行" |
+| **Claude Code** | 重量级 | 企业需求——18 种 Hook 事件、5 种权限模式、管理策略 |
+| **LangGraph** | 图引擎 | 学术背景——用有向图形式化保证执行正确性 |
+
+没有"正确"的厚度。Vercel AI SDK 薄是因为它是库——它的用户是开发者，开发者需要灵活性而非约束。Claude Code 厚是因为它直面企业环境——权限、审计、合规不是可选项。Pi 选择中间位置，是因为它的首要约束是可理解性：一个人能读懂全部代码，才能真正掌控系统。LangGraph 走了完全不同的路线，用图论的形式化保证取代了手工编排的脆弱性。你选哪种厚度，取决于你的约束和哲学，不取决于技术优劣。
+
+### 自治光谱
+
+Orchestrator 的设计还决定了 Agent 在自治光谱上的位置：
+
+- **human-in-the-loop（每步审批）** — 最安全但最慢。每个工具调用都需要用户确认。适合高风险操作（生产部署、财务交易）。
+- **human-on-the-loop（选择性干预）** — 平衡点。Agent 自主运行，但用户可以在任意时刻介入纠正。大多数编码 Agent（Pi、Claude Code、Cursor）在这里。
+- **human-out-of-the-loop（仅监控）** — 最快但风险最高。Agent 完全自主，用户只看最终结果。适合低风险、高重复性任务。
+
+Orchestrator 的权限系统、消息队列、停止条件共同决定了 Agent 落在光谱的哪个位置。同一个 Agent 核心，搭配不同的 Orchestrator 配置，可以在这三个级别之间自由切换——这正是 Pi 的 `AgentSession` 支持 Interactive / Print / RPC 三种模式的底层逻辑。
+
+---
+
+## Pi 的解法：AgentSession 解剖
+
+Pi 的 `AgentSession` 大约 3,180 行——是整个 Harness 中最大的单一文件。它不是"Agent 的一部分"，它**就是** Orchestrator。Agent 负责推理和工具调用，AgentSession 负责一切其他：生命周期、事件路由、错误恢复、消息协调、上下文管理。接下来我们逐层拆解它的关键设计决策。
+
+### 依赖注入与子系统协调
+
+AgentSession 的第一个设计决策是：**所有协作者都通过构造函数的配置对象注入，内部不创建任何依赖。**
+
+<SourceReader client:visible
+  filename="core/agent-session.ts — 依赖注入"
+  language="typescript"
+  code={codeAgentSessionCreate}
+  highlights={[
+    { line: 4, note: "SessionManager — 会话持久化（Ch12）" },
+    { line: 5, note: "SettingsManager — 配置管理（Ch13）" },
+    { line: 9, note: "所有协作者外部注入，不在内部创建" },
+  ]}
+/>
+
+看 `AgentSessionConfig` 接口：`agent`、`sessionManager`、`settingsManager`、`resourceLoader`、`modelRegistry`——每一个都是外部创建、外部拥有、通过配置传入的。AgentSession 从不 `new` 任何一个协作者。它甚至不知道这些协作者的具体实现类型，只依赖接口。
+
+构造函数的最后一行揭示了控制回路的起点：`this.agent.subscribe(this._handleAgentEvent)`。从这一刻起，Agent 产生的每一个事件——开始推理、工具调用、输出 token、遇到错误——都会流入 AgentSession 的事件处理管道。
+
+**Theory anchor:** 为什么不在内部 `new`？控制系统原理——controller 不应该和 plant 耦合。同一个 AgentSession 驱动 Interactive、Print、RPC 三种模式（Ch14），因为它不依赖任何特定的交付界面。依赖注入让 Orchestrator 变成了一个纯粹的协调器：它知道"何时做"和"做什么"，但不知道"谁来做"——具体实现由外部决定。
+
+### 事件分发与异步队列
+
+Agent 产生事件后，这些事件如何流转？AgentSession 用一条 Promise 链实现了严格的串行处理：
+
+<SourceReader client:visible
+  filename="core/agent-session.ts — 事件队列"
+  language="typescript"
+  code={codeEventQueue}
+  highlights={[
+    { line: 2, note: "Promise 链 — 队列初始为已 resolve 的 Promise" },
+    { line: 9, note: "核心：.then() 串入新事件，保证顺序" },
+    { line: 11, note: "前一个失败也继续 — 队列不因单个事件中断" },
+  ]}
+/>
+
+每个事件通过 `_processAgentEvent` 后被四路分发：
+
+- **SessionManager.append()** — 持久化到存储，确保崩溃恢复
+- **ExtensionRunner.dispatch()** — 通知扩展钩子（权限检查、自定义逻辑）
+- **UI callback** — 渲染到终端或 Web 界面
+- **Auto-compaction check** — 检查上下文是否需要压缩
+
+四路消费者都在同一个 Promise 链中依次执行——不是并行的。这看起来似乎低效，但这是刻意的设计选择。
+
+**Theory anchor:** 为什么事件必须串行处理？控制论的基本原则——并发反馈会腐蚀控制器状态。如果持久化和 UI 渲染并发处理同一事件，可能出现持久化成功但 UI 未更新，或反过来。更危险的是，如果两个事件并发触发 auto-compaction 检查，可能导致重复压缩或状态不一致。Promise 链确保每个事件被完整处理后才处理下一个——这是用吞吐量换正确性的经典权衡。
+
+### 消息队列与请求协调
+
+当 Agent 正在运行时，外部（用户、扩展、系统）可能需要向它注入消息。但不同消息有不同的时序语义——有些需要立即中断当前 turn，有些要等 turn 结束，有些要等到下一次用户输入。AgentSession 用三条独立的队列处理这三种语义：
+
+<SourceReader client:visible
+  filename="core/agent-session.ts — 三条消息队列"
+  language="typescript"
+  code={codeMessageTypes}
+  highlights={[
+    { line: 3, note: "steering — 立即注入，中断当前 turn" },
+    { line: 6, note: "follow-up — 当前 turn 结束后自动发送" },
+    { line: 9, note: "next-turn — 随下次用户输入一起注入" },
+  ]}
+/>
+
+为什么不能合并成一条队列？因为它们的投递时机完全不同：
+
+- **Steering 消息**是即时的。用户在 Agent 流式输出时敲入修正指令——"别改那个文件"——这条消息必须在当前 turn 的下一个 LLM 调用中出现，否则纠正就来不及了。
+- **Follow-up 消息**是延迟的。Agent 完成一个 turn 后，系统可能需要追加指令——"现在运行测试"。这些消息排队等待，turn 结束后自动触发新 turn。
+- **Next-turn 消息**是隐式的。扩展通过 `_pendingNextTurnMessages` 注入上下文信息（如文件变更通知），这些信息不触发新 turn，而是作为 context 附着在下一次用户输入上。
+
+还有一个特殊队列 `_pendingBashMessages`——bash 工具的输出如果在 Agent 流式响应期间到达，会被暂存而不是立即注入，避免打断正在生成的回复。这是一个微妙但重要的细节：控制带宽（Ch9 提到的概念）不是越大越好，投递时机和顺序同样关键。
+
+---
