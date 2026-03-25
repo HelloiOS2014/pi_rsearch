@@ -4,3 +4,4 @@ dist/
 # public/videos/*.mp4  # Videos are checked in (core tutorial content)
 .env
 .env.local
+.superpowers/
