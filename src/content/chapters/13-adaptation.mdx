@@ -1,0 +1,462 @@
+---
+title: "适应"
+chapter: 13
+description: "如何让同一个 Agent 服务不同的用户、项目和组织"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+
+export const codeSettingsDeepMerge = `// deepMergeSettings — 分层配置的核心算法
+// 原语覆盖，嵌套对象浅合并，数组整体替换
+function deepMergeSettings(base: Settings, overrides: Settings): Settings {
+  const result: Settings = { ...base };
+
+  for (const key of Object.keys(overrides) as (keyof Settings)[]) {
+    const overrideValue = overrides[key];
+    const baseValue = base[key];
+
+    if (overrideValue === undefined) continue;
+
+    // 嵌套对象：合并（compaction.enabled 覆盖，compaction.reserveTokens 继承）
+    if (
+      typeof overrideValue === "object" && overrideValue !== null &&
+      !Array.isArray(overrideValue) &&
+      typeof baseValue === "object" && baseValue !== null &&
+      !Array.isArray(baseValue)
+    ) {
+      (result as Record<string, unknown>)[key] = { ...baseValue, ...overrideValue };
+    } else {
+      // 原语和数组：override 直接胜出
+      (result as Record<string, unknown>)[key] = overrideValue;
+    }
+  }
+  return result;
+}
+
+// 用法：project settings 覆盖 global settings
+this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);`;
+
+export const codeDynamicPrompt = `// 动态 system prompt — 根据实际可用工具注入指南
+const hasBash = tools.includes("bash");
+const hasGrep = tools.includes("grep");
+const hasFind = tools.includes("find");
+const hasRead = tools.includes("read");
+const hasEdit = tools.includes("edit");
+
+// 只在同时有 bash + grep 时才注入这条指南
+if (hasBash && (hasGrep || hasFind || hasLs)) {
+  addGuideline("Prefer grep/find/ls tools over bash for file exploration");
+}
+
+// 只在有 read + edit 时才注入
+if (hasRead && hasEdit) {
+  addGuideline("Use read to examine files before editing");
+}
+
+// 只在有 edit 或 write 时才注入
+if (hasEdit || hasWrite) {
+  addGuideline("Output plain text directly - do NOT use cat or bash to display");
+}
+
+// 用户自定义 guidelines 追加（promptGuidelines 来自 settings/extension）
+for (const guideline of promptGuidelines ?? []) {
+  addGuideline(guideline.trim());
+}`;
+
+export const codeSkillDiscovery = `// Skill 发现算法 — SKILL.md 作为目录级标记
+// 规则：
+// 1. 目录包含 SKILL.md → 视为 skill root，不再递归
+// 2. 否则，根目录的 .md 文件视为独立 skill
+// 3. 子目录递归查找 SKILL.md
+
+function loadSkillsFromDirInternal(dir, source, includeRootFiles) {
+  const entries = readdirSync(dir, { withFileTypes: true });
+
+  // 第一遍：找 SKILL.md（找到即返回，不再递归）
+  for (const entry of entries) {
+    if (entry.name === "SKILL.md" && isFile(entry)) {
+      return loadSkillFromFile(join(dir, entry.name), source);
+    }
+  }
+
+  // 第二遍：递归子目录 + 加载根目录 .md
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+    if (isDirectory(entry)) {
+      recurse(entry); // includeRootFiles = false
+    } else if (includeRootFiles && entry.name.endsWith(".md")) {
+      loadSkillFromFile(entry);
+    }
+  }
+}
+
+// formatSkillsForPrompt — XML 输出，元数据常驻，内容按需加载
+function formatSkillsForPrompt(skills: Skill[]): string {
+  const visible = skills.filter(s => !s.disableModelInvocation);
+  return \`<available_skills>
+  <skill>
+    <name>\${skill.name}</name>
+    <description>\${skill.description}</description>
+    <location>\${skill.filePath}</location>
+  </skill>
+</available_skills>\`;
+  // Agent 看到 description 判断相关性 → read(location) 加载完整内容
+}`;
+
+export const codeModelResolver = `// parseModelPattern — last-colon 分割提取 thinking level
+// 支持模型 ID 中包含冒号（如 OpenRouter 的 model:exacto）
+function parseModelPattern(pattern, availableModels): ParsedModelResult {
+  // 1. 先尝试完整 pattern 匹配
+  const exactMatch = tryMatchModel(pattern, availableModels);
+  if (exactMatch) return { model: exactMatch, thinkingLevel: undefined };
+
+  // 2. 无匹配 → 在最后一个冒号处分割
+  const lastColonIndex = pattern.lastIndexOf(":");
+  if (lastColonIndex === -1) return { model: undefined };
+
+  const prefix = pattern.substring(0, lastColonIndex);   // "claude-opus-4-6"
+  const suffix = pattern.substring(lastColonIndex + 1);   // "high"
+
+  // 3. suffix 是合法 thinking level → 递归解析 prefix
+  if (isValidThinkingLevel(suffix)) {
+    const result = parseModelPattern(prefix, availableModels);
+    return { model: result.model, thinkingLevel: suffix };
+  }
+  // 4. suffix 非法 → 警告 + 递归（容错）
+  return parseModelPattern(prefix, availableModels);
+}
+
+// tryMatchModel — 别名优先，日期版本兜底
+function tryMatchModel(pattern, models) {
+  const exact = findExactModelReferenceMatch(pattern, models);
+  if (exact) return exact;
+  // partial match → 别名优先于 dated version
+  const aliases = matches.filter(m => isAlias(m.id)); // 无 -YYYYMMDD 后缀
+  return aliases[0] ?? datedVersions.sort().pop();
+}`;
+
+export const codeClaudeMdBefore = `# CLAUDE.md (自动生成版 — 200+ 行)
+
+## Project Overview
+This is a TypeScript project using React, Next.js, and Tailwind CSS.
+The project structure follows standard Next.js conventions.
+
+## Tech Stack
+- TypeScript 5.3
+- React 18.2
+- Next.js 14.1
+- Tailwind CSS 3.4
+- ESLint with custom config
+- Prettier for formatting
+- Jest for testing
+- Playwright for E2E
+
+## Directory Structure
+- src/app/ — Next.js App Router pages
+- src/components/ — React components
+- src/components/ui/ — UI primitives (Button, Input, Card...)
+- src/components/layout/ — Layout components (Header, Footer, Sidebar)
+- src/lib/ — Utility functions and helpers
+- src/hooks/ — Custom React hooks
+- src/types/ — TypeScript type definitions
+- src/styles/ — Global styles and Tailwind config
+- src/api/ — API route handlers
+- src/__tests__/ — Test files
+- public/ — Static assets
+- prisma/ — Database schema
+
+## Code Style
+- Use functional components with hooks
+- Prefer named exports over default exports
+- Use TypeScript strict mode
+- Follow ESLint rules defined in .eslintrc.json
+- Use Prettier with 2-space indentation
+- Semicolons required
+- Single quotes for strings
+- Trailing commas in multi-line structures
+
+## Database
+- PostgreSQL via Prisma ORM
+- Run "npx prisma generate" after schema changes
+- Run "npx prisma migrate dev" for migrations
+
+## Testing
+- Unit tests with Jest: npm test
+- E2E tests with Playwright: npx playwright test
+- Test files go in __tests__/ directories
+- Use data-testid attributes for E2E selectors
+
+## Git Conventions
+- Conventional commits (feat:, fix:, chore:, docs:)
+- Branch naming: feature/xxx, fix/xxx, chore/xxx
+- Always create PR, never push to main directly
+
+## API Patterns
+- REST endpoints in src/app/api/
+- Use zod for request validation
+- Return consistent JSON responses
+- Handle errors with try/catch and proper status codes
+
+## Environment Variables
+- NEXT_PUBLIC_ prefix for client-side vars
+- .env.local for local development
+- Never commit .env files`;
+
+export const codeClaudeMdAfter = `# CLAUDE.md (手工精简版 — 45 行)
+
+## 构建 & 测试
+npm run dev          # 开发服务器 :3000
+npm test             # Jest 单元测试
+npx playwright test  # E2E 测试（需要先 npm run build）
+npx prisma migrate dev  # 数据库迁移
+
+## 项目特殊约定
+- API 路由用 zod schema 校验，类型从 prisma 生成
+- 组件 props 必须用 interface 不用 type
+- 数据库查询只在 server component / API route 中
+- 认证走 next-auth，session 存 DB
+
+## 常见陷阱
+- Tailwind 不要用 @apply，直接写 className
+- prisma client 用 src/lib/db.ts 的单例，不要 new
+- Image 组件必须设 width/height，不要用 fill
+- middleware.ts 只处理 auth redirect，别加业务逻辑
+
+## 最近改动
+- 2024-03: 从 Pages Router 迁移到 App Router
+- 2024-02: 认证从 Firebase 换到 next-auth
+  → 旧的 useFirebaseAuth hook 已删除，用 useSession`;
+
+## Agent 只在我的环境里能用
+
+> 你花了一个周末调教 Agent，让它完美适配你的项目——知道你的代码规范、熟悉你的 API 模式、生成的代码风格一致。你满意地分享给团队。
+>
+> 周一早上，第一个反馈到了。同事 A 的项目用 GPT-4，你的 Agent 配置里硬编码了 Claude 的 API 格式，对话直接报错。
+>
+> 同事 B 的反馈更微妙：Agent 生成的代码全是 2-space indent，但他们团队用 tabs。"能不能加个配置？"你加了。然后同事 C 问能不能支持他们团队用的 Python linter。你又加了。System prompt 已经 3000 tokens 了。
+>
+> 产品经理想让 Agent 支持 code-review 工作流。你修改了 prompt，加了新指令。然后发现 coding 工作流开始出问题——review 的指令和 coding 的指令互相干扰。
+>
+> 最后，安全团队来了。"这个 Agent 不能在生产环境跑 bash"、"某些模型不允许在金融项目中使用"、"用户不能覆盖组织的安全策略"。
+>
+> **你的 Agent 能工作，但只在你的环境里。** 它不能服务不同的人、不同的项目、不同的组织。它是一个精心调教的单例，不是一个可适应的系统。
+
+---
+
+## 为什么会痛：适应鸿沟
+
+回到 Ch9 的理论框架：同一组模型权重，面对无限种上下文。每个用户有不同的工具链，每个项目有不同的规范，每个组织有不同的安全策略。Agent 在一个环境中学到的"技能"（prompt、配置、工作流）无法直接迁移到另一个环境——这就是**适应鸿沟**。
+
+HumanLayer 的实验提供了一个启发性数据点：在编程竞赛中，Opus 4.6 从 #33 提升到 #5，不是因为模型变了，而是因为**系统指令变了**。同样的模型权重，不同的 system prompt 和工具配置，产生了截然不同的表现。这说明"适应"不是锦上添花——它是性能的核心杠杆。
+
+**理论锚点：成本反转。** 更多指令不等于更好表现。研究和实践反复证明，CLAUDE.md 超过 60 行时，Agent 的遵从率开始下降——额外的 token 消耗了注意力预算，收益为负。适应的关键不是"加更多配置"，而是"在正确的层放正确的信息"。
+
+---
+
+## 三层分离
+
+Agent 的适应能力可以分解为三个独立的关注点：
+
+```
+知识层 (CLAUDE.md)    → "Agent 应该知道什么"    — 项目规范、惯例、陷阱
+能力层 (Skills/MCP)   → "Agent 能做什么"        — 可用的工具和专业指令
+策略层 (Settings)     → "Agent 被允许做什么"    — 模型选择、安全策略、资源限制
+```
+
+为什么要分离？因为它们的变更节奏不同（知识随项目演进，能力随功能扩展，策略由安全团队管理）、所有者不同（开发者 vs 平台团队 vs 安全团队）、作用域不同（文件级 vs 目录级 vs 组织级）。把它们混在一起意味着改一个策略就要碰所有 prompt——这是脆弱性的来源。
+
+---
+
+## 分层配置
+
+配置的核心问题是**作用域与优先级**。企业级安全策略不能被个人偏好覆盖，但个人的编辑器偏好不应该需要全局审批。
+
+Pi 采用两层：全局（`~/.pi-agent/settings.json`）和项目（`.pi/settings.json`）。Claude Code 更激进，有四层（Enterprise → Organization → Project → User）。Cursor 用两层但走不同路径（workspace settings vs global settings）。
+
+| 维度 | Pi (2 层) | Claude Code (4 层) | Cursor (2 层) | 为什么不同 |
+|------|-----------|-------------------|---------------|-----------|
+| 层数 | Global → Project | Enterprise → Org → Project → User | Global → Workspace | Pi 面向个人开发者，不需要企业层 |
+| 不可覆盖层 | 无 | Enterprise（管理员锁定） | 无 | Claude Code 服务企业客户 |
+| 合并策略 | Deep merge | 逐层覆盖 + 不可覆盖标记 | 浅覆盖 | Deep merge 允许部分覆盖嵌套字段 |
+| 版本控制 | Project 层随 git 共享 | Project 层随 git | Workspace 层随 git | 团队共享配置的通用模式 |
+
+Pi 的 deep merge 策略值得展开：原语值（`defaultModel: "gpt-5"`）直接覆盖，嵌套对象（`compaction: { enabled: true, reserveTokens: 8192 }`）浅合并——你可以在 project 层只覆盖 `compaction.enabled: false` 而继承全局的 `reserveTokens`。数组则整体替换，因为部分合并数组的语义不明确。
+
+SettingsManager 还跟踪哪些字段被修改过（`modifiedFields` Set），支持文件锁重试（最多 10 次，20ms 间隔），解析失败时用空对象兜底——确保 Agent 总能启动。
+
+<SourceReader client:visible
+  filename="core/settings-manager.ts"
+  language="typescript"
+  code={codeSettingsDeepMerge}
+  highlights={[
+    { line: 3, note: "三种合并策略：原语覆盖、嵌套对象浅合并、数组整体替换" },
+    { line: 11, note: "关键判断：是嵌套对象吗？（排除 null 和数组）" },
+    { line: 17, note: "嵌套对象：展开 base 再展开 override，override 字段胜出" },
+    { line: 20, note: "原语和数组：override 直接替换，不做合并" },
+    { line: 26, note: "最终合并点：project settings 覆盖 global settings" },
+  ]}
+/>
+
+---
+
+## 动态 System Prompt
+
+System prompt 不是一个静态字符串——它是一个根据当前环境**组装**出来的模块化文档。关键洞察：prompt 中的每一条指令都应该和实际可用的工具匹配。
+
+如果 bash 被禁用，prompt 中就不应该出现"use bash for file operations"。如果 grep 工具不存在，"prefer grep over bash"就是一条噪声指令。Pi 的 `buildSystemPrompt` 通过检查 `selectedTools` 来动态决定注入哪些 guidelines。
+
+<SourceReader client:visible
+  filename="core/system-prompt.ts"
+  language="typescript"
+  code={codeDynamicPrompt}
+  highlights={[
+    { line: 2, note: "从 selectedTools 派生出布尔标志" },
+    { line: 8, note: "条件注入：只在同时有 bash + grep 时才建议优先使用 grep" },
+    { line: 13, note: "read + edit 组合才需要 'read before edit' 指南" },
+    { line: 18, note: "用户自定义指南通过 promptGuidelines 追加" },
+  ]}
+/>
+
+**理论锚点：适应鸿沟 + 成本反转——禁用 bash 后仍出现 bash 指令 = 噪声（消耗注意力，零价值）。** 每一条无关指令都在竞争模型的注意力预算。Claude Code 将这个模式推到了极致：110+ 个 prompt 组件，每个组件有独立的 token 预算，根据当前工具集、用户历史、项目类型动态组装——最终 prompt 只包含当前上下文真正需要的信息。
+
+---
+
+## Skills：无代码能力扩展
+
+Skill 是一个元工具（meta-tool）：它不直接执行任何操作，而是**注入专业化的指令**到 Agent 的上下文中。当用户说"帮我 review 这个 PR"，Agent 不需要从零开始推理 code review 的最佳实践——它加载 `code-review` skill 的 SKILL.md，获得经过验证的专业指令。
+
+**渐进式披露（Progressive Disclosure）：** 50 个 skill 的完整内容如果常驻在 system prompt 中，会占据数万 token——这是 Ch9 成本反转的反面教材。Pi 的方案是元数据常驻（每个 skill 约 50 tokens：name + description + location），内容按需加载。Agent 看到 `<available_skills>` 列表后，根据 description 判断相关性，用 `read` 工具加载匹配的 skill 文件。
+
+**Ch8 vs Ch13 的边界：** Ch8 讨论的是 skill 的用户视角——如何编写 SKILL.md、frontmatter 格式、如何在对话中触发。本章关注的是**工程内部**：发现算法、验证管线、冲突检测。
+
+Pi 的 skill 发现遵循 "directory-as-root" 模式：如果一个目录包含 `SKILL.md`，这个目录就是一个 skill root，不再向下递归。这个设计允许 skill 内部包含辅助文件（examples、templates）而不被误识别为独立 skill。验证管线检查 name 格式（`[a-z0-9-]+`，不超过 64 字符）、description 必填（不超过 1024 字符）、name 必须匹配父目录名。Symlink 通过 `realpathSync` 去重，避免同一个 skill 文件通过不同路径被加载两次。Name collision 产生 diagnostic（第一个加载的胜出）。
+
+<SourceReader client:visible
+  filename="core/skills.ts"
+  language="typescript"
+  code={codeSkillDiscovery}
+  highlights={[
+    { line: 4, note: "SKILL.md 是目录级标记——找到即停止递归" },
+    { line: 10, note: "第一遍只找 SKILL.md，命中即返回" },
+    { line: 16, note: "第二遍：跳过隐藏目录和 node_modules" },
+    { line: 24, note: "XML 格式：name + description + location 三要素" },
+    { line: 31, note: "关键：只注入元数据，Agent 需要时再 read(location)" },
+  ]}
+/>
+
+---
+
+## 教学案例：CLAUDE.md 的精简之旅
+
+CLAUDE.md（或 AGENTS.md）是 Agent 了解项目的第一信息源。一个常见的反模式是把它当作完整的项目文档——把 README、CONTRIBUTING、CODE_STYLE 全部塞进去。自动生成工具更容易犯这个错误，因为它们倾向于"宁多勿少"。
+
+<CodeComparison client:visible
+  left={{ code: codeClaudeMdBefore, label: "自动生成版 (200+ 行)", language: "markdown" }}
+  right={{ code: codeClaudeMdAfter, label: "手工精简版 (45 行)", language: "markdown" }}
+/>
+
+实测数据：自动生成版增加了约 20% 的 token 成本（每次调用多消耗 ~500 tokens），但在代码质量评测中没有可测量的提升——模型已经从 `package.json`、`tsconfig.json`、`.eslintrc` 中推断出了大部分信息。手工精简版反而更好：更少的注意力干扰，更高的指令遵从率。
+
+**原则：CLAUDE.md 不是文档——是给 Agent 的备忘便签。只写模型不看代码就不会知道的东西。** "TypeScript 5.3"不需要写（`package.json` 里有）；"prisma client 用 `src/lib/db.ts` 的单例"需要写（这是项目惯例，代码结构不能直接推断）。
+
+---
+
+## 模型路由与选择
+
+不同的任务需要不同级别的模型能力。全用最强模型太贵，全用最弱模型质量不够。模型路由的策略是一个从简单到复杂的谱系：
+
+| 策略 | 描述 | 适用场景 | 代表 |
+|------|------|---------|------|
+| 统一最强 | 所有任务用同一个顶级模型 | 预算充足，任务简单 | 默认配置 |
+| 手动切换 | 用户在对话中手动切换模型 | 探索阶段 | Pi `/model` 命令 |
+| 任务分类 | 按任务类型自动选择模型 | 有明确的任务边界 | Claude Code 子 Agent |
+| Skill 指定 | Skill 文件声明推荐模型 | 特定工作流有最佳模型 | Pi skill metadata |
+| Plan-Execute | 弱模型规划，强模型执行关键步骤 | 长链任务，成本敏感 | ~90% 成本节省 |
+
+Pi 的 model resolver 处理一个看似简单但实际棘手的问题：从用户输入的 pattern（如 `claude-opus-4-6:high`）解析出**模型 + thinking level**。棘手之处在于模型 ID 本身可能包含冒号（OpenRouter 的 `model:exacto` 后缀）。Pi 用 last-colon split 解决：先尝试完整 pattern 匹配，失败后在最后一个冒号处分割。匹配时优先选择别名（`claude-opus-4-6`）而非带日期后缀的版本（`claude-opus-4-6-20250929`），支持 glob 模式（`*sonnet*`）。
+
+<SourceReader client:visible
+  filename="core/model-resolver.ts"
+  language="typescript"
+  code={codeModelResolver}
+  highlights={[
+    { line: 3, note: "先试完整 pattern——处理模型 ID 本身包含冒号的情况" },
+    { line: 7, note: "Last-colon split：从最后一个冒号分割，不是第一个" },
+    { line: 13, note: "递归解析：prefix 可能还包含冒号" },
+    { line: 21, note: "别名优先：claude-opus-4-6 优于 claude-opus-4-6-20250929" },
+  ]}
+/>
+
+---
+
+## 资源管理
+
+Pi 的 ResourceLoader 统一管理五类资源：extensions（代码扩展）、skills（专业指令）、prompts（提示模板）、themes（主题样式）、context files（CLAUDE.md / AGENTS.md）。每类资源遵循相同的模式：从多个路径加载（全局 + 项目 + 自定义路径），携带 PathMetadata（来源包名、是否来自 npm），支持 collision 检测和 diagnostic 报告。
+
+资源发现支持目录树遍历（递归扫描 + .gitignore 过滤）和显式路径两种模式。`extendResources` 方法允许 extensions 动态注册新的 skill/prompt 路径，实现了扩展可以扩展扩展的元编程能力。reload 方法支持热重载——用户修改 SKILL.md 后不需要重启 Agent。
+
+---
+
+## 不同产品为什么做了不同选择
+
+| 维度 | Pi | Claude Code | Cursor | LangChain |
+|------|-----|------------|--------|-----------|
+| **配置层数** | 2（Global + Project） | 4（Enterprise → User） | 2（Global + Workspace） | 1（代码级） |
+| **Prompt 构建** | 工具感知动态组装 | 110+ 组件 + token 预算 | 模板 + 上下文注入 | 开发者手动拼接 |
+| **Skills** | SKILL.md 发现 + XML 注入 | 内置 skill 系统 | 无独立 skill 概念 | Tools + Chains |
+| **模型路由** | last-colon 解析 + 别名 | 内置级联（主模型 + 子 Agent 弱模型） | 按 Tab 类型选择 | 开发者自定义 Router |
+| **动态能力** | 工具感知 guidelines | 工具 + 上下文双重感知 | 上下文感知补全 | 无（静态配置） |
+| **上下文文件** | CLAUDE.md / AGENTS.md | CLAUDE.md（目录层级遍历） | .cursorrules | 无 |
+
+关键分歧在**控制权的位置**。Pi 和 Claude Code 把适应逻辑内建在 Harness 中——用户通过声明式配置影响行为。LangChain 把控制权完全交给开发者——灵活但每个项目要从头实现。Cursor 走中间路线——部分内建（模型选择、上下文注入），部分开放（.cursorrules 自定义）。
+
+---
+
+## 动手实现
+
+`demos/13-adapt/` 包含可运行的 demo：
+
+```bash
+# Demo 1: 分层配置 — global settings + project override + deep merge
+npx tsx demos/13-adapt/src/01-layered-config.ts
+
+# Demo 2: 动态 prompt — 根据工具集组装 system prompt
+npx tsx demos/13-adapt/src/02-dynamic-prompt.ts
+
+# Demo 3: Skill 发现 — 从目录结构加载 skills
+npx tsx demos/13-adapt/src/03-skill-discovery.ts
+```
+
+运行三个 demo，观察配置合并的行为、prompt 随工具集变化的差异、以及 skill 发现的输出。
+
+---
+
+## 元技能
+
+**"先减后加"路径：** 不要从"这个 Agent 还缺什么"开始。从最小配置启动——空 CLAUDE.md、4 个基础工具（read, bash, edit, write）、默认模型——然后观察 Agent 在哪里失败。每一个观察到的失败都指向一个具体的配置/skill/prompt 需求。这比预先设计 50 条 guidelines 有效得多。
+
+**60 行规则：** CLAUDE.md 控制在 60 行以内。如果你发现自己在 CLAUDE.md 里写了超过 60 行的内容，这是一个信号——你需要把多余的内容提取为 Skills。Skill 是按需加载的，不占用常驻注意力预算。
+
+**Working Backwards：** 从期望的 Agent 行为出发，反向推导需要什么配置。"我希望 Agent 在这个项目中使用 tabs 而不是 spaces"——这是一条 CLAUDE.md 规则。"我希望 Agent 能做 code review"——这是一个 Skill。"我希望 Agent 不能在生产环境跑 bash"——这是一个 Settings 策略。行为 → 层级 → 具体配置。
+
+---
+
+## 简化思考
+
+模型越来越擅长从代码本身学习风格和惯例。TypeScript 的 `strict: true`、ESLint 的 `no-unused-vars`、Prettier 的 `tabWidth: 4`——这些信息已经存在于配置文件中，模型可以直接推断。这意味着越来越多的"风格配置"会变得不必要。
+
+但安全策略不可简化。"不允许执行 `rm -rf /`"、"金融项目只能用经过审计的模型"、"用户不能覆盖组织级策略"——这些约束不存在于代码中，只能通过显式的配置层来强制执行。适应系统会趋向两极：自动推断的部分越来越多，显式策略的部分越来越硬。
+
+---
+
+## 检验标准
+
+- [ ] 项目级 settings 覆盖全局特定字段，其余继承
+- [ ] 禁用 bash 后 prompt 无 bash 指导原则
+- [ ] 自定义 Skill 描述出现在 system prompt
+- [ ] /skill:name 正确加载并注入
+- [ ] model:high 解析为模型 + thinking level
+- [ ] 配置解析失败时用默认值启动
+
+Agent 可控、可靠、有记忆、能适应。但只有你一个人在终端里用它。你的 CI 需要它，你的 IDE 需要它，你的团队需要策略审批。下一章——最后一章——我们让 Agent 到达用户手中。
