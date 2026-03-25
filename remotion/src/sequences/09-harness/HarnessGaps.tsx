@@ -204,7 +204,7 @@ export const HarnessGaps: React.FC = () => {
             {/* Node box */}
             <div
               style={{
-                padding: "16px 32px",
+                padding: "18px 36px",
                 borderRadius: 10,
                 border: `2.5px solid ${gap.color}`,
                 backgroundColor: `${gap.color}15`,
@@ -222,7 +222,7 @@ export const HarnessGaps: React.FC = () => {
             {/* Chapter label */}
             <div
               style={{
-                fontSize: 18,
+                fontSize: 28,
                 fontWeight: 500,
                 color: gap.color,
                 fontFamily: "'SF Mono', monospace",

@@ -206,15 +206,15 @@ export const EditMatching: React.FC = () => {
   };
 
   const boxStyle: React.CSSProperties = {
-    padding: "20px 32px",
+    padding: "24px 40px",
     borderRadius: 10,
     border: "1px solid rgba(255,255,255,0.1)",
     backgroundColor: "rgba(255,255,255,0.03)",
     fontFamily: MONO,
-    fontSize: 30,
+    fontSize: 36,
     letterSpacing: 1.5,
     lineHeight: 1.6,
-    minHeight: 100,
+    minHeight: 110,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -261,7 +261,7 @@ export const EditMatching: React.FC = () => {
           {/* Header */}
           <div
             style={{
-              fontSize: 44,
+              fontSize: 48,
               fontWeight: 700,
               color: "#6e8efb",
               opacity: headerProgress,
@@ -293,7 +293,7 @@ export const EditMatching: React.FC = () => {
           {/* Smart quote callout */}
           <div
             style={{
-              fontSize: 22,
+              fontSize: 28,
               color: DIM,
               opacity: codeOpacity * 0.7,
               fontFamily: MONO,
@@ -367,7 +367,7 @@ export const EditMatching: React.FC = () => {
           {/* Header */}
           <div
             style={{
-              fontSize: 44,
+              fontSize: 48,
               fontWeight: 700,
               color: "#D97757",
               opacity: headerProgress,
@@ -397,7 +397,7 @@ export const EditMatching: React.FC = () => {
           {/* Regular quote callout */}
           <div
             style={{
-              fontSize: 22,
+              fontSize: 28,
               color: DIM,
               opacity: codeOpacity * 0.7,
               fontFamily: MONO,
@@ -463,10 +463,10 @@ export const EditMatching: React.FC = () => {
         >
           <div
             style={{
-              fontSize: 16,
+              fontSize: 28,
               color: YELLOW,
               fontFamily: MONO,
-              padding: "4px 12px",
+              padding: "6px 16px",
               borderRadius: 6,
               backgroundColor: "rgba(251,191,36,0.1)",
               border: "1px solid rgba(251,191,36,0.3)",
@@ -474,7 +474,7 @@ export const EditMatching: React.FC = () => {
           >
             normalize()
           </div>
-          <div style={{ fontSize: 22, color: YELLOW }}>
+          <div style={{ fontSize: 28, color: YELLOW }}>
             {"\u201c"} {"\u2192"} &quot;
           </div>
         </div>
@@ -491,20 +491,20 @@ export const EditMatching: React.FC = () => {
             opacity: stage3Opacity,
             display: "flex",
             flexDirection: "column",
-            gap: 12,
-            padding: "32px 48px",
+            gap: 16,
+            padding: "40px 56px",
             borderRadius: 12,
             border: `1px solid rgba(248,113,113,0.3)`,
             backgroundColor: "rgba(248,113,113,0.05)",
-            minWidth: 680,
+            minWidth: 780,
           }}
         >
           <div
             style={{
-              fontSize: 28,
+              fontSize: 36,
               fontWeight: 700,
               color: RED,
-              marginBottom: 8,
+              marginBottom: 10,
               fontFamily: FONT,
             }}
           >
@@ -518,15 +518,15 @@ export const EditMatching: React.FC = () => {
             <div
               key={item.label}
               style={{
-                fontSize: 22,
+                fontSize: 28,
                 color: TEXT,
                 opacity: errorLineOpacities[i],
                 fontFamily: MONO,
                 display: "flex",
-                gap: 12,
+                gap: 14,
               }}
             >
-              <span style={{ color: RED, fontWeight: 600, minWidth: 60 }}>
+              <span style={{ color: RED, fontWeight: 600, minWidth: 80 }}>
                 {item.label}:
               </span>
               <span>{item.value}</span>
@@ -543,7 +543,7 @@ export const EditMatching: React.FC = () => {
             bottom: 50,
             left: "50%",
             transform: "translateX(-50%)",
-            fontSize: 30,
+            fontSize: 36,
             fontWeight: 600,
             color: stageColors[currentStage],
             opacity:
@@ -553,7 +553,7 @@ export const EditMatching: React.FC = () => {
                   ? stage2LabelOpacity
                   : stage3Opacity,
             fontFamily: FONT,
-            padding: "8px 28px",
+            padding: "10px 32px",
             borderRadius: 8,
             backgroundColor: `${stageColors[currentStage]}10`,
             border: `1px solid ${stageColors[currentStage]}30`,

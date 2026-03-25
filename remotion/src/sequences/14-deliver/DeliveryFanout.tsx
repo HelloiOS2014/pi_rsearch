@@ -193,7 +193,7 @@ export const DeliveryFanout: React.FC = () => {
           backgroundColor: `rgba(217, 119, 87, 0.12)`,
           boxShadow: `0 0 ${20 + glowIntensity * 40}px rgba(217, 119, 87, ${glowIntensity * 0.5})`,
           color: "#f0e6e0",
-          fontSize: 32,
+          fontSize: 36,
           fontWeight: 700,
           fontFamily: "'SF Mono', 'Fira Code', monospace",
           whiteSpace: "nowrap",
@@ -224,15 +224,15 @@ export const DeliveryFanout: React.FC = () => {
             {/* Icon area */}
             <div
               style={{
-                width: 100,
-                height: 100,
+                width: 110,
+                height: 110,
                 borderRadius: 16,
                 border: `2px solid ${ep.color}`,
                 backgroundColor: `${ep.color}15`,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                fontSize: 34,
+                fontSize: 36,
                 color: ep.color,
                 fontFamily: "'SF Mono', monospace",
                 boxShadow: `0 0 20px ${ep.color}30`,
@@ -246,7 +246,7 @@ export const DeliveryFanout: React.FC = () => {
             {/* Label */}
             <div
               style={{
-                fontSize: 30,
+                fontSize: 36,
                 fontWeight: 600,
                 color: ep.color,
                 fontFamily: "'SF Pro Display', Helvetica, Arial, sans-serif",

@@ -37,17 +37,17 @@ interface Extension {
 }
 
 const EXTENSIONS: Extension[] = [
-  { name: "Audit Logger", color: "#4ade80", events: ["tool_call", "tool_result", "error"], angle: -40, radius: 400 },
-  { name: "Rate Limiter", color: "#f472b6", events: ["llm_start", "token", "retry"], angle: 30, radius: 380 },
-  { name: "Custom Tools", color: "#60a5fa", events: ["tool_register", "tool_call"], angle: 100, radius: 400 },
-  { name: "Memory Cache", color: "#fbbf24", events: ["memory_save", "memory_load", "session_start"], angle: 170, radius: 390 },
-  { name: "Stats Reporter", color: "#a78bfa", events: ["stats_request", "tool_result", "llm_end"], angle: 240, radius: 400 },
-  { name: "Error Handler", color: "#fb923c", events: ["error", "retry", "abort"], angle: 310, radius: 380 },
+  { name: "Audit Logger", color: "#4ade80", events: ["tool_call", "tool_result", "error"], angle: -40, radius: 500 },
+  { name: "Rate Limiter", color: "#f472b6", events: ["llm_start", "token", "retry"], angle: 30, radius: 480 },
+  { name: "Custom Tools", color: "#60a5fa", events: ["tool_register", "tool_call"], angle: 100, radius: 500 },
+  { name: "Memory Cache", color: "#fbbf24", events: ["memory_save", "memory_load", "session_start"], angle: 170, radius: 490 },
+  { name: "Stats Reporter", color: "#a78bfa", events: ["stats_request", "tool_result", "llm_end"], angle: 240, radius: 500 },
+  { name: "Error Handler", color: "#fb923c", events: ["error", "retry", "abort"], angle: 310, radius: 480 },
 ];
 
 const CENTER_X = 960;
 const CENTER_Y = 500;
-const EVENT_RADIUS = 200;
+const EVENT_RADIUS = 260;
 
 export const ExtensionArch: React.FC = () => {
   const frame = useCurrentFrame();
@@ -154,7 +154,7 @@ export const ExtensionArch: React.FC = () => {
           top: 40,
           width: "100%",
           textAlign: "center",
-          fontSize: 44,
+          fontSize: 48,
           fontWeight: 700,
           color: "#e0e0e0",
           opacity: titleOpacity,
@@ -166,10 +166,10 @@ export const ExtensionArch: React.FC = () => {
       <div
         style={{
           position: "absolute",
-          top: 100,
+          top: 105,
           width: "100%",
           textAlign: "center",
-          fontSize: 20,
+          fontSize: 28,
           color: "rgba(255,255,255,0.35)",
           opacity: titleOpacity,
           fontFamily: "'SF Mono', monospace",
@@ -202,7 +202,7 @@ export const ExtensionArch: React.FC = () => {
         <circle
           cx={CENTER_X}
           cy={CENTER_Y}
-          r={80 * busProgress}
+          r={100 * busProgress}
           fill="url(#busGradient)"
           stroke="#D97757"
           strokeWidth={2}
@@ -212,7 +212,7 @@ export const ExtensionArch: React.FC = () => {
           <circle
             cx={CENTER_X}
             cy={CENTER_Y}
-            r={80 + busPulse * 15}
+            r={100 + busPulse * 15}
             fill="none"
             stroke="#D97757"
             strokeWidth={1}
@@ -242,7 +242,7 @@ export const ExtensionArch: React.FC = () => {
               <circle
                 cx={dotX}
                 cy={dotY}
-                r={6}
+                r={8}
                 fill={busPulse > 0.4 ? "#D97757" : "rgba(217,119,87,0.7)"}
                 opacity={p}
                 filter={busPulse > 0.4 ? "url(#extGlow)" : undefined}
@@ -250,9 +250,9 @@ export const ExtensionArch: React.FC = () => {
               {/* Label */}
               {p > 0.8 && (
                 <text
-                  x={dotX + (pos.x > CENTER_X ? 12 : -12)}
-                  y={dotY + 4}
-                  fontSize={11}
+                  x={dotX + (pos.x > CENTER_X ? 16 : -16)}
+                  y={dotY + 8}
+                  fontSize={28}
                   fill="rgba(255,255,255,0.5)"
                   fontFamily="'SF Mono', monospace"
                   textAnchor={pos.x > CENTER_X ? "start" : "end"}
@@ -321,11 +321,11 @@ export const ExtensionArch: React.FC = () => {
       <div
         style={{
           position: "absolute",
-          left: CENTER_X - 60,
-          top: CENTER_Y - 18,
-          width: 120,
+          left: CENTER_X - 90,
+          top: CENTER_Y - 22,
+          width: 180,
           textAlign: "center",
-          fontSize: 20,
+          fontSize: 36,
           fontWeight: 700,
           color: "#D97757",
           opacity: busProgress,
@@ -345,17 +345,17 @@ export const ExtensionArch: React.FC = () => {
             key={`ext-${ei}`}
             style={{
               position: "absolute",
-              left: pos.x - 75,
-              top: pos.y - 22,
-              width: 150,
-              height: 44,
-              borderRadius: 10,
+              left: pos.x - 110,
+              top: pos.y - 30,
+              width: 220,
+              height: 60,
+              borderRadius: 12,
               border: `2px solid ${ext.color}70`,
               backgroundColor: `${ext.color}12`,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              fontSize: 14,
+              fontSize: 28,
               fontWeight: 600,
               color: ext.color,
               fontFamily: "'SF Pro Display', Helvetica, Arial, sans-serif",
@@ -378,7 +378,7 @@ export const ExtensionArch: React.FC = () => {
           bottom: 50,
           width: "100%",
           textAlign: "center",
-          fontSize: 18,
+          fontSize: 28,
           color: "rgba(255,255,255,0.3)",
           fontFamily: "'SF Mono', monospace",
           opacity: interpolate(frame, [350, 390], [0, 1], {

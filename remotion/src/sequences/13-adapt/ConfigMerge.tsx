@@ -170,7 +170,7 @@ export const ConfigMerge: React.FC = () => {
           position: "absolute",
           top: 40,
           right: 60,
-          fontSize: 28,
+          fontSize: 36,
           fontWeight: 600,
           color,
           opacity,
@@ -197,13 +197,13 @@ export const ConfigMerge: React.FC = () => {
         style={{
           opacity: appear,
           transform: `translateY(${yOffset}px)`,
-          width: 650,
-          padding: "22px 36px",
+          width: 780,
+          padding: "28px 44px",
           borderRadius: 10,
           border: `1px solid ${layer.color}55`,
           backgroundColor: `${layer.color}10`,
           fontFamily: FONT,
-          fontSize: 18,
+          fontSize: 28,
           color: TEXT,
           position: "relative",
           ...customStyle,
@@ -212,10 +212,10 @@ export const ConfigMerge: React.FC = () => {
         {/* Layer label */}
         <div
           style={{
-            fontSize: 17,
+            fontSize: 28,
             fontWeight: 700,
             color: layer.color,
-            marginBottom: 12,
+            marginBottom: 14,
             fontFamily: FONT_DISPLAY,
             letterSpacing: 0.5,
           }}
@@ -387,7 +387,7 @@ export const ConfigMerge: React.FC = () => {
           position: "absolute",
           top: 36,
           left: 60,
-          fontSize: 36,
+          fontSize: 48,
           fontWeight: 700,
           color: TEXT,
           fontFamily: FONT_DISPLAY,
@@ -472,23 +472,23 @@ export const ConfigMerge: React.FC = () => {
 
               <div
                 style={{
-                  width: 630,
-                  padding: "32px 44px",
+                  width: 750,
+                  padding: "36px 48px",
                   borderRadius: 12,
                   border: `2px solid ${GREEN}`,
                   backgroundColor: `${GREEN}08`,
                   fontFamily: FONT,
-                  fontSize: 18,
+                  fontSize: 28,
                   color: TEXT,
                   boxShadow: `0 0 ${resultGlow * 30}px ${GREEN}30`,
                 }}
               >
                 <div
                   style={{
-                    fontSize: 19,
+                    fontSize: 28,
                     fontWeight: 700,
                     color: GREEN,
-                    marginBottom: 18,
+                    marginBottom: 20,
                     fontFamily: FONT_DISPLAY,
                     letterSpacing: 0.5,
                   }}
@@ -510,8 +510,8 @@ export const ConfigMerge: React.FC = () => {
                     </span>
                     <span
                       style={{
-                        marginLeft: 8,
-                        fontSize: 14,
+                        marginLeft: 10,
+                        fontSize: 28,
                         color: entry.color,
                         opacity: 0.6,
                       }}

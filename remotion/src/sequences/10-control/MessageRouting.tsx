@@ -230,7 +230,7 @@ export const MessageRouting: React.FC = () => {
           top: 50,
           width: "100%",
           textAlign: "center",
-          fontSize: 44,
+          fontSize: 48,
           fontWeight: 700,
           color: "#e0e0e0",
           opacity: interpolate(frame, [0, 25], [0, 1], {
@@ -247,10 +247,10 @@ export const MessageRouting: React.FC = () => {
       <div
         style={{
           position: "absolute",
-          top: 110,
+          top: 115,
           width: "100%",
           textAlign: "center",
-          fontSize: 20,
+          fontSize: 28,
           fontWeight: 400,
           color: "rgba(255,255,255,0.4)",
           opacity: interpolate(frame, [10, 30], [0, 1], {
@@ -267,10 +267,10 @@ export const MessageRouting: React.FC = () => {
       <div
         style={{
           position: "absolute",
-          left: ROUTER_X - 110,
-          top: 465,
-          width: 220,
-          height: 150,
+          left: ROUTER_X - 130,
+          top: 450,
+          width: 260,
+          height: 180,
           borderRadius: 16,
           border: `2px solid ${ACCENT}`,
           backgroundColor: `${ACCENT}15`,
@@ -285,7 +285,7 @@ export const MessageRouting: React.FC = () => {
       >
         <div
           style={{
-            fontSize: 26,
+            fontSize: 36,
             fontWeight: 700,
             color: ACCENT,
           }}
@@ -294,7 +294,7 @@ export const MessageRouting: React.FC = () => {
         </div>
         <div
           style={{
-            fontSize: 17,
+            fontSize: 28,
             fontWeight: 500,
             color: stateColor,
             opacity: statePulse,
@@ -326,7 +326,7 @@ export const MessageRouting: React.FC = () => {
           const progress = pipeProgresses[i];
           if (progress <= 0) return null;
 
-          const routerOutX = ROUTER_X + 110;
+          const routerOutX = ROUTER_X + 130;
           const routerOutY = 540;
           const pipeInX = PIPE_START_X;
           const pipeInY = pipe.y;
@@ -359,10 +359,10 @@ export const MessageRouting: React.FC = () => {
               style={{
                 position: "absolute",
                 left: PIPE_START_X,
-                top: pipe.y - 32,
+                top: pipe.y - 40,
                 width: pipeWidth,
-                height: 64,
-                borderRadius: 32,
+                height: 80,
+                borderRadius: 40,
                 border: `2px solid ${pipe.color}50`,
                 backgroundColor: `${pipe.color}08`,
                 overflow: "hidden",
@@ -388,8 +388,8 @@ export const MessageRouting: React.FC = () => {
               style={{
                 position: "absolute",
                 left: PIPE_START_X + 16,
-                top: pipe.y - 64,
-                fontSize: 24,
+                top: pipe.y - 78,
+                fontSize: 36,
                 fontWeight: 700,
                 color: pipe.color,
                 opacity: progress,
@@ -403,9 +403,9 @@ export const MessageRouting: React.FC = () => {
             <div
               style={{
                 position: "absolute",
-                left: PIPE_START_X + pipeWidth - 170,
-                top: pipe.y - 12,
-                fontSize: 20,
+                left: PIPE_START_X + pipeWidth - 190,
+                top: pipe.y - 16,
+                fontSize: 28,
                 fontWeight: 500,
                 color: `${pipe.color}cc`,
                 opacity: progress,
@@ -421,8 +421,8 @@ export const MessageRouting: React.FC = () => {
               style={{
                 position: "absolute",
                 left: PIPE_START_X + 16,
-                top: pipe.y + 38,
-                fontSize: 14,
+                top: pipe.y + 46,
+                fontSize: 28,
                 fontWeight: 400,
                 color: "rgba(255,255,255,0.3)",
                 opacity: progress,
@@ -442,10 +442,10 @@ export const MessageRouting: React.FC = () => {
       <div
         style={{
           position: "absolute",
-          left: AGENT_CORE_X - 75,
-          top: 465,
-          width: 150,
-          height: 150,
+          left: AGENT_CORE_X - 90,
+          top: 450,
+          width: 180,
+          height: 180,
           borderRadius: "50%",
           border: `2px solid ${ACCENT}80`,
           backgroundColor: `${ACCENT}10`,
@@ -458,7 +458,7 @@ export const MessageRouting: React.FC = () => {
       >
         <div
           style={{
-            fontSize: 22,
+            fontSize: 28,
             fontWeight: 700,
             color: ACCENT,
             textAlign: "center",
@@ -490,7 +490,7 @@ export const MessageRouting: React.FC = () => {
           return (
             <path
               key={`to-core-${i}`}
-              d={`M ${PIPE_END_X} ${pipe.y} Q ${PIPE_END_X + 30} ${pipe.y}, ${AGENT_CORE_X - 75} ${coreInY}`}
+              d={`M ${PIPE_END_X} ${pipe.y} Q ${PIPE_END_X + 30} ${pipe.y}, ${AGENT_CORE_X - 90} ${coreInY}`}
               fill="none"
               stroke={`${pipe.color}${Math.round(progress * 40)
                 .toString(16)
@@ -527,17 +527,17 @@ export const MessageRouting: React.FC = () => {
             key={`msg-${i}`}
             style={{
               position: "absolute",
-              left: pos.x - 70,
-              top: pos.y - 24,
-              padding: "12px 22px",
-              borderRadius: 14,
+              left: pos.x - 80,
+              top: pos.y - 28,
+              padding: "14px 26px",
+              borderRadius: 16,
               backgroundColor:
                 pos.toPipeProgress > 0.5 ? `${pipe.color}30` : "rgba(255,255,255,0.08)",
               border: `1px solid ${
                 pos.toPipeProgress > 0.5 ? `${pipe.color}60` : "rgba(255,255,255,0.15)"
               }`,
               color: pos.toPipeProgress > 0.5 ? pipe.color : "#e0e0e0",
-              fontSize: 22,
+              fontSize: 28,
               fontWeight: 500,
               whiteSpace: "nowrap",
               opacity: pos.appearProgress * hideProgress,
@@ -560,7 +560,7 @@ export const MessageRouting: React.FC = () => {
           position: "absolute",
           left: LEFT_X - 80,
           top: 230,
-          fontSize: 26,
+          fontSize: 28,
           fontWeight: 600,
           color: "rgba(255,255,255,0.5)",
           opacity: interpolate(frame, [40, 60], [0, 1], {
@@ -577,13 +577,13 @@ export const MessageRouting: React.FC = () => {
         <div
           style={{
             position: "absolute",
-            left: ROUTER_X - 80,
-            top: 645,
-            fontSize: 15,
+            left: ROUTER_X - 120,
+            top: 660,
+            fontSize: 28,
             color: "rgba(255,255,255,0.35)",
             fontFamily: "'SF Mono', monospace",
             textAlign: "center",
-            width: 160,
+            width: 240,
             opacity: interpolate(frame, [55, 65], [0, 1], {
               extrapolateLeft: "clamp",
               extrapolateRight: "clamp",
@@ -597,13 +597,13 @@ export const MessageRouting: React.FC = () => {
         <div
           style={{
             position: "absolute",
-            left: ROUTER_X - 80,
-            top: 645,
-            fontSize: 15,
+            left: ROUTER_X - 120,
+            top: 660,
+            fontSize: 28,
             color: "rgba(255,255,255,0.35)",
             fontFamily: "'SF Mono', monospace",
             textAlign: "center",
-            width: 160,
+            width: 240,
             opacity: interpolate(frame, [145, 155], [0, 1], {
               extrapolateLeft: "clamp",
               extrapolateRight: "clamp",
@@ -640,15 +640,15 @@ export const MessageRouting: React.FC = () => {
           >
             <div
               style={{
-                width: 12,
-                height: 12,
+                width: 14,
+                height: 14,
                 borderRadius: "50%",
                 backgroundColor: pipe.color,
               }}
             />
             <span
               style={{
-                fontSize: 18,
+                fontSize: 28,
                 color: "#999",
               }}
             >
