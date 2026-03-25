@@ -1,0 +1,168 @@
+---
+title: "控制回路"
+chapter: 10
+description: "如何让 Agent 成为可控的系统：生命周期、事件分发、错误恢复"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+
+export const codeAgentSessionCreate = `// AgentSession 构造函数 — 通过配置对象注入所有依赖
+interface AgentSessionConfig {
+  agent: Agent;                    // 核心 Agent 实例（推理引擎）
+  sessionManager: SessionManager;  // 会话持久化
+  settingsManager: SettingsManager;// 用户设置（重试、压缩等）
+  cwd: string;                     // 工作目录
+  resourceLoader: ResourceLoader;  // 技能、提示词、主题加载
+  modelRegistry: ModelRegistry;    // API Key 解析与模型发现
+  customTools?: ToolDefinition[];  // 外部扩展注册的工具
+  scopedModels?: ScopedModel[];    // 可切换的模型列表
+}
+
+// 构造时立即订阅 Agent 事件 — 控制回路的起点
+constructor(config: AgentSessionConfig) {
+  this.agent = config.agent;
+  this.sessionManager = config.sessionManager;
+  this.settingsManager = config.settingsManager;
+  // ...注入其他依赖
+
+  // 订阅 Agent 事件，驱动整个控制回路
+  this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+}`;
+
+export const codeEventQueue = `// 事件队列 — 用 Promise 链保证串行处理
+private _agentEventQueue: Promise<void> = Promise.resolve();
+
+private _handleAgentEvent = (event: AgentEvent): void => {
+  // 同步创建 retry promise（避免竞态）
+  this._createRetryPromiseForAgentEnd(event);
+
+  // 将事件处理串入 Promise 链，保证顺序执行
+  this._agentEventQueue = this._agentEventQueue.then(
+    () => this._processAgentEvent(event),
+    () => this._processAgentEvent(event), // 前一个失败也继续处理
+  );
+
+  // 防止未捕获的 rejection 导致队列断裂
+  this._agentEventQueue.catch(() => {});
+};`;
+
+export const codeMessageTypes = `// 三条消息队列 — 不同优先级，不同投递时机
+// 1. 转向消息：中断当前 turn，立即注入
+private _steeringMessages: string[] = [];
+
+// 2. 后续消息：等当前 turn 结束后自动发送
+private _followUpMessages: string[] = [];
+
+// 3. 下一轮附加消息：作为 context 随下次用户输入一起发送
+private _pendingNextTurnMessages: CustomMessage[] = [];
+
+// prompt() 中根据 Agent 状态选择队列
+if (this.isStreaming) {
+  if (options.streamingBehavior === "followUp") {
+    await this._queueFollowUp(text, images);  // 排队等待
+  } else {
+    await this._queueSteer(text, images);      // 立即中断
+  }
+  return;
+}`;
+
+export const codeAutoRetry = `// 自动重试 — 指数退避，可中断，错误分类
+private _isRetryableError(message: AssistantMessage): boolean {
+  if (message.stopReason !== "error") return false;
+  // Context Overflow 由压缩处理，不走重试
+  if (isContextOverflow(message, contextWindow)) return false;
+  // 匹配可重试的错误模式：限流、过载、网络错误
+  return /overloaded|rate.?limit|429|500|502|503|504|
+    service.?unavailable|network.?error|connection.?error|
+    fetch failed|timed? out|timeout/i.test(message.errorMessage);
+}
+
+private async _handleRetryableError(message: AssistantMessage) {
+  this._retryAttempt++;
+  if (this._retryAttempt > settings.maxRetries) {
+    this._emit({ type: "auto_retry_end", success: false });
+    return false;  // 超出上限，放弃
+  }
+  // 指数退避：1s → 2s → 4s → 8s...
+  const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+  await sleep(delayMs, this._retryAbortController.signal);
+  // 从 Agent 状态中移除错误消息，重新发送
+  this.agent.replaceMessages(messages.slice(0, -1));
+  setTimeout(() => this.agent.continue(), 0);
+  return true;
+}`;
+
+export const codeOverflowRecovery = `// Context Overflow 恢复 — 压缩 + 重试，仅尝试一次
+private _overflowRecoveryAttempted = false;
+
+private async _checkCompaction(assistantMessage: AssistantMessage) {
+  // Case 1: Overflow — LLM 报告上下文溢出
+  if (isContextOverflow(assistantMessage, contextWindow)) {
+    if (this._overflowRecoveryAttempted) {
+      // 已经试过一次，不再重复——避免无限循环
+      this._emit({
+        type: "auto_compaction_end",
+        errorMessage: "Context overflow recovery failed after one attempt.",
+      });
+      return;
+    }
+    this._overflowRecoveryAttempted = true;
+    // 从 Agent 状态中移除错误消息
+    this.agent.replaceMessages(messages.slice(0, -1));
+    // 触发自动压缩，压缩完成后自动重试
+    await this._runAutoCompaction("overflow", true);
+    return;
+  }
+
+  // Case 2: Threshold — 上下文接近上限，预防性压缩
+  if (shouldCompact(contextTokens, contextWindow, settings)) {
+    await this._runAutoCompaction("threshold", false);
+  }
+}`;
+
+## Agent 失控了
+
+> 你在 Demo 06 中构建的 Agent 已经能跑起来了。它读文件、写代码、调工具，终端里的输出流畅而自信。你觉得是时候让它干点正事了——把项目里散落的旧 API 调用迁移到新版 SDK。
+>
+> **第 5 分钟**，你发现 Agent 走偏了。它开始修改一个不需要改的文件，而且越改越深入。你想纠正它——但没有任何办法。Agent 正在执行一个 LLM 调用，你发出的消息进不去，只能等它把当前 turn 跑完。你盯着屏幕看它把一个无辜的 `utils.ts` 改得面目全非，束手无策。你唯一的选项是 Ctrl+C 杀掉进程。
+>
+> **第 10 分钟**，你重启了 Agent，重新给了指令。它干了三分钟，然后 API 返回 `429 Too Many Requests`。Agent 把这个错误当成了任务的一部分，尝试"理解"它，输出了一段关于 HTTP 状态码的解释，然后停了下来。没有重试，没有退避，没有恢复——一个临时的限流错误，直接终结了整个工作流。
+>
+> 你再次重启。Agent 像第一次见到你一样：`"Hello! How can I help you today?"` 它不记得已经迁移了 4 个文件。不记得你说过 `auth.ts` 要特殊处理。不记得你们之间关于 error boundary 的讨论。一切从零开始。
+>
+> 第三次尝试。这回走得远了一些，但 Agent 在编辑 `config.ts` 时遇到了一个字符匹配失败。它没有换个策略，而是用完全相同的方式重试了 5 次——相同的 diff，相同的错误，相同的结果。循环，循环，循环。
+>
+> 到了第四次尝试，你学聪明了，在 Agent 工作时输入了一条补充指令："对了，`config.ts` 里的引号是中文引号，注意处理。" 你等了两分钟，Agent 完全忽略了你的消息。后来你才发现，这条消息被排进了一个队列，要等当前 turn 结束才会投递——但当前 turn 是一个长达 8 分钟的多步骤编辑链。
+>
+> 你回头看了看代码。Agent 的核心循环完好无损——`while` 循环在转，LLM 在推理，Tool 在执行。一切都在"正常工作"。
+>
+> 但它无法被中途修正。它无法从瞬时错误中恢复。它在崩溃后失去全部记忆。它在失败时无限重复。它听不到你的实时反馈。
+
+你的 Agent 有一个大脑，但没有神经系统。
+
+大脑负责思考——LLM 推理、Tool 调用、代码生成。这些你在 Part 1 中已经构建好了。但一个只有大脑的系统是脆弱的。它缺少的是将大脑连接到现实世界的控制回路：感知环境变化、处理异常信号、维持运行状态、接收外部指令。
+
+这正是从 Demo 到产品之间那条看不见的鸿沟。
+
+---
+
+## 为什么会痛：控制系统视角
+
+回顾 Ch9 的控制系统模型，Agent Harness 的核心职责之一就是实现对 Agent 行为的闭环控制。上面的每一个痛点，都对应着控制理论中一个具体的失败模式。
+
+**无法中途修正 → 可控性不足（Controllability）。** 一个可控的系统，意味着操作者可以在任意时刻将系统从当前状态引导到期望状态。你的 Agent 在 turn 执行期间拒绝接受外部输入——它的可控性在每个 turn 内降到了零。这不是"功能缺失"，是控制论意义上的系统不可控。
+
+**API 限流导致崩溃 → 扰动抑制缺失（Disturbance Rejection）。** 在控制理论中，外部干扰（噪声、扰动）是系统必须处理的常态，不是异常。429 错误是一个典型的可预测扰动——它的到来不是问题，系统没有扰动抑制回路才是问题。一个健壮的控制系统会检测扰动类型、选择恢复策略、自动重试。
+
+**重启后失忆 → 状态不持续（State Persistence）。** 控制系统的状态是决策的基础。温度控制器记住当前温度，PID 控制器积累历史误差。当你的 Agent 崩溃重启后状态归零，它变成了一个无记忆的开环系统——每次行动都基于零信息，无法从历史中学习。
+
+**消息投递延迟 → 控制带宽不足（Control Bandwidth）。** 控制带宽决定了系统对输入变化的响应速度。你的补充指令需要等 8 分钟才能到达 Agent——这意味着控制带宽远低于实际需求。在一个变化速度快于控制响应的系统中，操作者实际上丧失了控制权。
+
+**相同失败重复 5 次 → 稳定性失败（Stability）。** 一个稳定的系统，当受到扰动后应该收敛回正常状态，而不是在错误模式中震荡。Agent 用相同的方式反复尝试相同的失败操作，这是教科书级的不稳定行为——正反馈循环导致系统锁死在错误状态。
+
+这五个问题不是五个独立的 bug。它们是同一个架构缺失的五种症状：**你的 Agent 没有控制回路。**
+
+Pi 如何解决这些问题？答案就在 `AgentSession` 这个类里——它是 Agent 的神经系统，将感知、决策和执行编织成一个完整的控制回路。接下来，我们一层一层地拆开它。
+
+---
