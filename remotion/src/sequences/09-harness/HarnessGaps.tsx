@@ -10,7 +10,7 @@ import {
 const ACCENT = "#D97757";
 const CENTER_X = 960;
 const CENTER_Y = 540;
-const RADIUS = 300;
+const RADIUS = 400;
 
 interface GapNode {
   label: string;
@@ -117,7 +117,7 @@ export const HarnessGaps: React.FC = () => {
           r={RADIUS}
           fill="none"
           stroke="rgba(255,255,255,0.15)"
-          strokeWidth={1.5}
+          strokeWidth={2.5}
           strokeDasharray="8 6"
           opacity={ringOpacity}
         />
@@ -140,7 +140,7 @@ export const HarnessGaps: React.FC = () => {
               x2={endX}
               y2={endY}
               stroke={gap.color}
-              strokeWidth={2.5}
+              strokeWidth={3}
               strokeLinecap="round"
               opacity={interpolate(progress, [0, 0.3], [0, 0.7], {
                 extrapolateRight: "clamp",
@@ -162,12 +162,12 @@ export const HarnessGaps: React.FC = () => {
             [0.6, 1]
           )})`,
           opacity: coreOpacity,
-          padding: "18px 36px",
+          padding: "24px 48px",
           borderRadius: 14,
-          border: `2px solid ${ACCENT}`,
+          border: `2.5px solid ${ACCENT}`,
           backgroundColor: "rgba(217, 119, 87, 0.08)",
           boxShadow: `0 0 ${20 + glowPulse * 35}px rgba(217, 119, 87, ${glowPulse * 0.5})`,
-          fontSize: 30,
+          fontSize: 36,
           fontWeight: 700,
           color: "#e0e0e0",
           fontFamily: "'SF Pro Display', Helvetica, Arial, sans-serif",
@@ -204,12 +204,12 @@ export const HarnessGaps: React.FC = () => {
             {/* Node box */}
             <div
               style={{
-                padding: "12px 24px",
+                padding: "16px 32px",
                 borderRadius: 10,
-                border: `1.5px solid ${gap.color}`,
+                border: `2.5px solid ${gap.color}`,
                 backgroundColor: `${gap.color}15`,
                 boxShadow: `0 0 18px ${gap.color}30`,
-                fontSize: 22,
+                fontSize: 28,
                 fontWeight: 600,
                 color: "#e0e0e0",
                 fontFamily: "'SF Pro Display', Helvetica, Arial, sans-serif",
@@ -222,7 +222,7 @@ export const HarnessGaps: React.FC = () => {
             {/* Chapter label */}
             <div
               style={{
-                fontSize: 14,
+                fontSize: 18,
                 fontWeight: 500,
                 color: gap.color,
                 fontFamily: "'SF Mono', monospace",

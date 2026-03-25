@@ -206,15 +206,15 @@ export const EditMatching: React.FC = () => {
   };
 
   const boxStyle: React.CSSProperties = {
-    padding: "16px 24px",
+    padding: "20px 32px",
     borderRadius: 10,
     border: "1px solid rgba(255,255,255,0.1)",
     backgroundColor: "rgba(255,255,255,0.03)",
     fontFamily: MONO,
-    fontSize: 26,
+    fontSize: 30,
     letterSpacing: 1.5,
     lineHeight: 1.6,
-    minHeight: 60,
+    minHeight: 100,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -254,18 +254,18 @@ export const EditMatching: React.FC = () => {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            padding: 60,
-            gap: 30,
+            padding: 80,
+            gap: 50,
           }}
         >
           {/* Header */}
           <div
             style={{
-              fontSize: 36,
+              fontSize: 44,
               fontWeight: 700,
               color: "#6e8efb",
               opacity: headerProgress,
-              marginBottom: 20,
+              marginBottom: 50,
             }}
           >
             Token 空间 (LLM)
@@ -293,7 +293,7 @@ export const EditMatching: React.FC = () => {
           {/* Smart quote callout */}
           <div
             style={{
-              fontSize: 18,
+              fontSize: 22,
               color: DIM,
               opacity: codeOpacity * 0.7,
               fontFamily: MONO,
@@ -306,7 +306,7 @@ export const EditMatching: React.FC = () => {
           {stage1Active && mismatchDetected && (
             <div
               style={{
-                fontSize: 28,
+                fontSize: 36,
                 fontWeight: 700,
                 color: RED,
                 opacity: mismatchOpacity,
@@ -315,7 +315,7 @@ export const EditMatching: React.FC = () => {
                 gap: 10,
               }}
             >
-              <span style={{ fontSize: 36 }}>{"\u2717"}</span> 字符不匹配
+              <span style={{ fontSize: 44 }}>{"\u2717"}</span> 字符不匹配
             </div>
           )}
 
@@ -323,7 +323,7 @@ export const EditMatching: React.FC = () => {
           {stage2Active && normalizeProgress >= 1 && (
             <div
               style={{
-                fontSize: 28,
+                fontSize: 36,
                 fontWeight: 700,
                 color: GREEN,
                 opacity: matchSuccess,
@@ -333,7 +333,7 @@ export const EditMatching: React.FC = () => {
                 transform: `scale(${interpolate(matchSuccess, [0, 1], [0.8, 1])})`,
               }}
             >
-              <span style={{ fontSize: 36 }}>{"\u2713"}</span> 匹配成功
+              <span style={{ fontSize: 44 }}>{"\u2713"}</span> 匹配成功
             </div>
           )}
         </div>
@@ -360,18 +360,18 @@ export const EditMatching: React.FC = () => {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            padding: 60,
-            gap: 30,
+            padding: 80,
+            gap: 50,
           }}
         >
           {/* Header */}
           <div
             style={{
-              fontSize: 36,
+              fontSize: 44,
               fontWeight: 700,
               color: "#D97757",
               opacity: headerProgress,
-              marginBottom: 20,
+              marginBottom: 50,
             }}
           >
             Byte 空间 (文件)
@@ -397,7 +397,7 @@ export const EditMatching: React.FC = () => {
           {/* Regular quote callout */}
           <div
             style={{
-              fontSize: 18,
+              fontSize: 22,
               color: DIM,
               opacity: codeOpacity * 0.7,
               fontFamily: MONO,
@@ -410,7 +410,7 @@ export const EditMatching: React.FC = () => {
           {stage1Active && mismatchDetected && (
             <div
               style={{
-                fontSize: 28,
+                fontSize: 36,
                 fontWeight: 700,
                 color: RED,
                 opacity: mismatchOpacity,
@@ -419,7 +419,7 @@ export const EditMatching: React.FC = () => {
                 gap: 10,
               }}
             >
-              <span style={{ fontSize: 36 }}>{"\u2717"}</span> 字符不匹配
+              <span style={{ fontSize: 44 }}>{"\u2717"}</span> 字符不匹配
             </div>
           )}
 
@@ -427,7 +427,7 @@ export const EditMatching: React.FC = () => {
           {stage2Active && normalizeProgress >= 1 && (
             <div
               style={{
-                fontSize: 28,
+                fontSize: 36,
                 fontWeight: 700,
                 color: GREEN,
                 opacity: matchSuccess,
@@ -437,7 +437,7 @@ export const EditMatching: React.FC = () => {
                 transform: `scale(${interpolate(matchSuccess, [0, 1], [0.8, 1])})`,
               }}
             >
-              <span style={{ fontSize: 36 }}>{"\u2713"}</span> 匹配成功
+              <span style={{ fontSize: 44 }}>{"\u2713"}</span> 匹配成功
             </div>
           )}
         </div>
@@ -492,16 +492,16 @@ export const EditMatching: React.FC = () => {
             display: "flex",
             flexDirection: "column",
             gap: 12,
-            padding: "24px 40px",
+            padding: "32px 48px",
             borderRadius: 12,
             border: `1px solid rgba(248,113,113,0.3)`,
             backgroundColor: "rgba(248,113,113,0.05)",
-            minWidth: 500,
+            minWidth: 680,
           }}
         >
           <div
             style={{
-              fontSize: 22,
+              fontSize: 28,
               fontWeight: 700,
               color: RED,
               marginBottom: 8,
@@ -518,7 +518,7 @@ export const EditMatching: React.FC = () => {
             <div
               key={item.label}
               style={{
-                fontSize: 18,
+                fontSize: 22,
                 color: TEXT,
                 opacity: errorLineOpacities[i],
                 fontFamily: MONO,
@@ -543,7 +543,7 @@ export const EditMatching: React.FC = () => {
             bottom: 50,
             left: "50%",
             transform: "translateX(-50%)",
-            fontSize: 26,
+            fontSize: 30,
             fontWeight: 600,
             color: stageColors[currentStage],
             opacity:

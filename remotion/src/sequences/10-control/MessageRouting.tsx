@@ -19,9 +19,9 @@ interface PipeDef {
 }
 
 const PIPES: PipeDef[] = [
-  { label: "Steering", sublabel: "立即中断", color: "#f87171", y: 340 },
+  { label: "Steering", sublabel: "立即中断", color: "#f87171", y: 270 },
   { label: "FollowUp", sublabel: "等 turn 结束", color: "#fbbf24", y: 540 },
-  { label: "NextTurn", sublabel: "随下次输入", color: "#60a5fa", y: 740 },
+  { label: "NextTurn", sublabel: "随下次输入", color: "#60a5fa", y: 810 },
 ];
 
 // Message definitions
@@ -267,10 +267,10 @@ export const MessageRouting: React.FC = () => {
       <div
         style={{
           position: "absolute",
-          left: ROUTER_X - 90,
-          top: 480,
-          width: 180,
-          height: 120,
+          left: ROUTER_X - 110,
+          top: 465,
+          width: 220,
+          height: 150,
           borderRadius: 16,
           border: `2px solid ${ACCENT}`,
           backgroundColor: `${ACCENT}15`,
@@ -278,14 +278,14 @@ export const MessageRouting: React.FC = () => {
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
-          gap: 8,
+          gap: 10,
           opacity: routerScale,
           transform: `scale(${interpolate(routerScale, [0, 1], [0.7, 1])})`,
         }}
       >
         <div
           style={{
-            fontSize: 20,
+            fontSize: 26,
             fontWeight: 700,
             color: ACCENT,
           }}
@@ -294,7 +294,7 @@ export const MessageRouting: React.FC = () => {
         </div>
         <div
           style={{
-            fontSize: 14,
+            fontSize: 17,
             fontWeight: 500,
             color: stateColor,
             opacity: statePulse,
@@ -326,7 +326,7 @@ export const MessageRouting: React.FC = () => {
           const progress = pipeProgresses[i];
           if (progress <= 0) return null;
 
-          const routerOutX = ROUTER_X + 90;
+          const routerOutX = ROUTER_X + 110;
           const routerOutY = 540;
           const pipeInX = PIPE_START_X;
           const pipeInY = pipe.y;
@@ -359,10 +359,10 @@ export const MessageRouting: React.FC = () => {
               style={{
                 position: "absolute",
                 left: PIPE_START_X,
-                top: pipe.y - 24,
+                top: pipe.y - 32,
                 width: pipeWidth,
-                height: 48,
-                borderRadius: 24,
+                height: 64,
+                borderRadius: 32,
                 border: `2px solid ${pipe.color}50`,
                 backgroundColor: `${pipe.color}08`,
                 overflow: "hidden",
@@ -388,8 +388,8 @@ export const MessageRouting: React.FC = () => {
               style={{
                 position: "absolute",
                 left: PIPE_START_X + 16,
-                top: pipe.y - 56,
-                fontSize: 18,
+                top: pipe.y - 64,
+                fontSize: 24,
                 fontWeight: 700,
                 color: pipe.color,
                 opacity: progress,
@@ -403,9 +403,9 @@ export const MessageRouting: React.FC = () => {
             <div
               style={{
                 position: "absolute",
-                left: PIPE_START_X + pipeWidth - 160,
-                top: pipe.y - 10,
-                fontSize: 16,
+                left: PIPE_START_X + pipeWidth - 170,
+                top: pipe.y - 12,
+                fontSize: 20,
                 fontWeight: 500,
                 color: `${pipe.color}cc`,
                 opacity: progress,
@@ -421,8 +421,8 @@ export const MessageRouting: React.FC = () => {
               style={{
                 position: "absolute",
                 left: PIPE_START_X + 16,
-                top: pipe.y + 30,
-                fontSize: 12,
+                top: pipe.y + 38,
+                fontSize: 14,
                 fontWeight: 400,
                 color: "rgba(255,255,255,0.3)",
                 opacity: progress,
@@ -442,10 +442,10 @@ export const MessageRouting: React.FC = () => {
       <div
         style={{
           position: "absolute",
-          left: AGENT_CORE_X - 55,
-          top: 490,
-          width: 110,
-          height: 110,
+          left: AGENT_CORE_X - 75,
+          top: 465,
+          width: 150,
+          height: 150,
           borderRadius: "50%",
           border: `2px solid ${ACCENT}80`,
           backgroundColor: `${ACCENT}10`,
@@ -458,7 +458,7 @@ export const MessageRouting: React.FC = () => {
       >
         <div
           style={{
-            fontSize: 16,
+            fontSize: 22,
             fontWeight: 700,
             color: ACCENT,
             textAlign: "center",
@@ -486,11 +486,11 @@ export const MessageRouting: React.FC = () => {
           const progress = pipeProgresses[i];
           if (progress <= 0) return null;
 
-          const coreInY = 545; // center of Agent Core
+          const coreInY = 540; // center of Agent Core
           return (
             <path
               key={`to-core-${i}`}
-              d={`M ${PIPE_END_X} ${pipe.y} Q ${PIPE_END_X + 30} ${pipe.y}, ${AGENT_CORE_X - 55} ${coreInY}`}
+              d={`M ${PIPE_END_X} ${pipe.y} Q ${PIPE_END_X + 30} ${pipe.y}, ${AGENT_CORE_X - 75} ${coreInY}`}
               fill="none"
               stroke={`${pipe.color}${Math.round(progress * 40)
                 .toString(16)
@@ -527,17 +527,17 @@ export const MessageRouting: React.FC = () => {
             key={`msg-${i}`}
             style={{
               position: "absolute",
-              left: pos.x - 60,
-              top: pos.y - 20,
-              padding: "8px 18px",
-              borderRadius: 12,
+              left: pos.x - 70,
+              top: pos.y - 24,
+              padding: "12px 22px",
+              borderRadius: 14,
               backgroundColor:
                 pos.toPipeProgress > 0.5 ? `${pipe.color}30` : "rgba(255,255,255,0.08)",
               border: `1px solid ${
                 pos.toPipeProgress > 0.5 ? `${pipe.color}60` : "rgba(255,255,255,0.15)"
               }`,
               color: pos.toPipeProgress > 0.5 ? pipe.color : "#e0e0e0",
-              fontSize: 18,
+              fontSize: 22,
               fontWeight: 500,
               whiteSpace: "nowrap",
               opacity: pos.appearProgress * hideProgress,
@@ -560,7 +560,7 @@ export const MessageRouting: React.FC = () => {
           position: "absolute",
           left: LEFT_X - 80,
           top: 230,
-          fontSize: 22,
+          fontSize: 26,
           fontWeight: 600,
           color: "rgba(255,255,255,0.5)",
           opacity: interpolate(frame, [40, 60], [0, 1], {
@@ -577,13 +577,13 @@ export const MessageRouting: React.FC = () => {
         <div
           style={{
             position: "absolute",
-            left: ROUTER_X - 70,
-            top: 625,
-            fontSize: 13,
+            left: ROUTER_X - 80,
+            top: 645,
+            fontSize: 15,
             color: "rgba(255,255,255,0.35)",
             fontFamily: "'SF Mono', monospace",
             textAlign: "center",
-            width: 140,
+            width: 160,
             opacity: interpolate(frame, [55, 65], [0, 1], {
               extrapolateLeft: "clamp",
               extrapolateRight: "clamp",
@@ -597,13 +597,13 @@ export const MessageRouting: React.FC = () => {
         <div
           style={{
             position: "absolute",
-            left: ROUTER_X - 70,
-            top: 625,
-            fontSize: 13,
+            left: ROUTER_X - 80,
+            top: 645,
+            fontSize: 15,
             color: "rgba(255,255,255,0.35)",
             fontFamily: "'SF Mono', monospace",
             textAlign: "center",
-            width: 140,
+            width: 160,
             opacity: interpolate(frame, [145, 155], [0, 1], {
               extrapolateLeft: "clamp",
               extrapolateRight: "clamp",
@@ -648,7 +648,7 @@ export const MessageRouting: React.FC = () => {
             />
             <span
               style={{
-                fontSize: 16,
+                fontSize: 18,
                 color: "#999",
               }}
             >

@@ -170,7 +170,7 @@ export const ConfigMerge: React.FC = () => {
           position: "absolute",
           top: 40,
           right: 60,
-          fontSize: 22,
+          fontSize: 28,
           fontWeight: 600,
           color,
           opacity,
@@ -197,13 +197,13 @@ export const ConfigMerge: React.FC = () => {
         style={{
           opacity: appear,
           transform: `translateY(${yOffset}px)`,
-          width: 380,
-          padding: "14px 20px",
+          width: 500,
+          padding: "20px 32px",
           borderRadius: 10,
           border: `1px solid ${layer.color}55`,
           backgroundColor: `${layer.color}10`,
           fontFamily: FONT,
-          fontSize: 14,
+          fontSize: 18,
           color: TEXT,
           position: "relative",
           ...customStyle,
@@ -212,10 +212,10 @@ export const ConfigMerge: React.FC = () => {
         {/* Layer label */}
         <div
           style={{
-            fontSize: 13,
+            fontSize: 17,
             fontWeight: 700,
             color: layer.color,
-            marginBottom: 8,
+            marginBottom: 12,
             fontFamily: FONT_DISPLAY,
             letterSpacing: 0.5,
           }}
@@ -225,7 +225,7 @@ export const ConfigMerge: React.FC = () => {
         {/* Entries */}
         {layer.entries.map((entry) => {
           let entryStyle: React.CSSProperties = {
-            marginBottom: 4,
+            marginBottom: 8,
             lineHeight: 1.6,
             position: "relative",
           };
@@ -360,7 +360,7 @@ export const ConfigMerge: React.FC = () => {
           zIndex: 10,
         }}
       >
-        <svg width="24" height="36" viewBox="0 0 24 36">
+        <svg width="40" height="60" viewBox="0 0 24 36">
           <path
             d="M12 0 L12 28 M6 22 L12 28 L18 22"
             stroke={color}
@@ -387,7 +387,7 @@ export const ConfigMerge: React.FC = () => {
           position: "absolute",
           top: 36,
           left: 60,
-          fontSize: 28,
+          fontSize: 36,
           fontWeight: 700,
           color: TEXT,
           fontFamily: FONT_DISPLAY,
@@ -421,7 +421,7 @@ export const ConfigMerge: React.FC = () => {
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
-            gap: 16,
+            gap: 28,
             marginRight: 80,
           }}
         >
@@ -465,8 +465,8 @@ export const ConfigMerge: React.FC = () => {
               }}
             >
               <svg
-                width="60"
-                height="24"
+                width="100"
+                height="40"
                 viewBox="0 0 60 24"
                 style={{
                   opacity: resultAppear,
@@ -483,23 +483,23 @@ export const ConfigMerge: React.FC = () => {
 
               <div
                 style={{
-                  width: 400,
-                  padding: "18px 24px",
+                  width: 520,
+                  padding: "28px 40px",
                   borderRadius: 12,
                   border: `2px solid ${GREEN}`,
                   backgroundColor: `${GREEN}08`,
                   fontFamily: FONT,
-                  fontSize: 15,
+                  fontSize: 18,
                   color: TEXT,
                   boxShadow: `0 0 ${resultGlow * 30}px ${GREEN}30`,
                 }}
               >
                 <div
                   style={{
-                    fontSize: 15,
+                    fontSize: 19,
                     fontWeight: 700,
                     color: GREEN,
-                    marginBottom: 12,
+                    marginBottom: 18,
                     fontFamily: FONT_DISPLAY,
                     letterSpacing: 0.5,
                   }}
@@ -510,7 +510,7 @@ export const ConfigMerge: React.FC = () => {
                   <div
                     key={entry.key}
                     style={{
-                      marginBottom: 6,
+                      marginBottom: 10,
                       lineHeight: 1.7,
                     }}
                   >
@@ -522,7 +522,7 @@ export const ConfigMerge: React.FC = () => {
                     <span
                       style={{
                         marginLeft: 8,
-                        fontSize: 11,
+                        fontSize: 14,
                         color: entry.color,
                         opacity: 0.6,
                       }}

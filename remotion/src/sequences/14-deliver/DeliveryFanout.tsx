@@ -18,10 +18,10 @@ interface Endpoint {
 }
 
 const ENDPOINTS: Endpoint[] = [
-  { label: "TUI", color: "#4ade80", x: 260, y: 200 },       // top-left
-  { label: "Print", color: "#60a5fa", x: 1660, y: 200 },     // top-right
-  { label: "RPC", color: "#fbbf24", x: 260, y: 880 },        // bottom-left
-  { label: "SDK", color: "#a78bfa", x: 1660, y: 880 },       // bottom-right
+  { label: "TUI", color: "#4ade80", x: 210, y: 150 },       // top-left
+  { label: "Print", color: "#60a5fa", x: 1710, y: 150 },     // top-right
+  { label: "RPC", color: "#fbbf24", x: 210, y: 930 },        // bottom-left
+  { label: "SDK", color: "#a78bfa", x: 1710, y: 930 },       // bottom-right
 ];
 
 const CENTER_X = 960;
@@ -97,8 +97,8 @@ export const DeliveryFanout: React.FC = () => {
               x2={endX}
               y2={endY}
               stroke={ep.color}
-              strokeWidth={2}
-              strokeOpacity={0.4}
+              strokeWidth={3.5}
+              strokeOpacity={0.6}
             />
           );
         })}
@@ -125,7 +125,7 @@ export const DeliveryFanout: React.FC = () => {
                 extrapolateRight: "clamp",
               });
 
-              const radius = interpolate(t, [0, 0.5, 1], [3, 5, 3], {
+              const radius = interpolate(t, [0, 0.5, 1], [6, 10, 6], {
                 extrapolateLeft: "clamp",
                 extrapolateRight: "clamp",
               });
@@ -171,9 +171,9 @@ export const DeliveryFanout: React.FC = () => {
                   key={`glow-${i}-${pi}`}
                   cx={px}
                   cy={py}
-                  r={12}
+                  r={18}
                   fill={ep.color}
-                  opacity={alpha * 0.2}
+                  opacity={alpha * 0.28}
                 />
               );
             });
@@ -187,13 +187,13 @@ export const DeliveryFanout: React.FC = () => {
           left: CENTER_X,
           top: CENTER_Y,
           transform: `translate(-50%, -50%) scale(${centerScale})`,
-          padding: "18px 36px",
-          borderRadius: 14,
+          padding: "22px 44px",
+          borderRadius: 16,
           border: `2px solid ${ACCENT}`,
           backgroundColor: `rgba(217, 119, 87, 0.12)`,
           boxShadow: `0 0 ${20 + glowIntensity * 40}px rgba(217, 119, 87, ${glowIntensity * 0.5})`,
           color: "#f0e6e0",
-          fontSize: 28,
+          fontSize: 32,
           fontWeight: 700,
           fontFamily: "'SF Mono', 'Fira Code', monospace",
           whiteSpace: "nowrap",
@@ -218,21 +218,21 @@ export const DeliveryFanout: React.FC = () => {
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
-              gap: 8,
+              gap: 14,
             }}
           >
             {/* Icon area */}
             <div
               style={{
-                width: 60,
-                height: 60,
-                borderRadius: 12,
+                width: 100,
+                height: 100,
+                borderRadius: 16,
                 border: `2px solid ${ep.color}`,
                 backgroundColor: `${ep.color}15`,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                fontSize: 24,
+                fontSize: 34,
                 color: ep.color,
                 fontFamily: "'SF Mono', monospace",
                 boxShadow: `0 0 20px ${ep.color}30`,
@@ -246,7 +246,7 @@ export const DeliveryFanout: React.FC = () => {
             {/* Label */}
             <div
               style={{
-                fontSize: 22,
+                fontSize: 30,
                 fontWeight: 600,
                 color: ep.color,
                 fontFamily: "'SF Pro Display', Helvetica, Arial, sans-serif",

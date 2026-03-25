@@ -102,10 +102,10 @@ export const MemoryHierarchy: React.FC = () => {
     const progress = layerProgress[index];
     const topWidthPct = 30 + index * 16; // 30%, 46%, 62%, 78%
     const bottomWidthPct = topWidthPct + 10;
-    const height = 90;
+    const height = 130;
 
     // Build SVG trapezoid
-    const svgW = 600;
+    const svgW = 780;
     const svgH = height;
     const topInset = ((100 - topWidthPct) / 200) * svgW;
     const botInset = ((100 - bottomWidthPct) / 200) * svgW;
@@ -120,7 +120,7 @@ export const MemoryHierarchy: React.FC = () => {
           alignItems: "center",
           justifyContent: "center",
           position: "relative",
-          marginBottom: 4,
+          marginBottom: 24,
         }}
       >
         <svg
@@ -142,7 +142,7 @@ export const MemoryHierarchy: React.FC = () => {
             textAnchor="middle"
             dominantBaseline="middle"
             fill="#e0e0e0"
-            fontSize={22}
+            fontSize={28}
             fontWeight={700}
             fontFamily="'SF Pro Display', Helvetica, Arial, sans-serif"
           >
@@ -155,7 +155,7 @@ export const MemoryHierarchy: React.FC = () => {
             textAnchor="middle"
             dominantBaseline="middle"
             fill={layer.color}
-            fontSize={15}
+            fontSize={19}
             fontWeight={400}
             fontFamily="'SF Mono', Consolas, monospace"
             opacity={0.8}
@@ -172,7 +172,7 @@ export const MemoryHierarchy: React.FC = () => {
               right: -10,
               top: "50%",
               transform: "translateY(-50%)",
-              fontSize: 14,
+              fontSize: 17,
               color: layer.color,
               ...font,
               fontWeight: 500,
@@ -181,7 +181,7 @@ export const MemoryHierarchy: React.FC = () => {
               background: `${layer.color}15`,
               border: `1px solid ${layer.color}40`,
               borderRadius: 6,
-              padding: "3px 10px",
+              padding: "6px 14px",
             }}
           >
             {layer.tag}
@@ -199,15 +199,15 @@ export const MemoryHierarchy: React.FC = () => {
     limitLine: boolean,
     opacity: number,
   ) => {
-    const barContainerWidth = 500;
+    const barContainerWidth = 680;
     return (
       <div style={{ opacity, marginBottom: 16 }}>
         <div
           style={{
-            fontSize: 18,
+            fontSize: 24,
             fontWeight: 600,
             color: "#e0e0e0",
-            marginBottom: 8,
+            marginBottom: 14,
             ...font,
           }}
         >
@@ -217,7 +217,7 @@ export const MemoryHierarchy: React.FC = () => {
           style={{
             position: "relative",
             width: barContainerWidth,
-            height: 36,
+            height: 50,
             borderRadius: 6,
             backgroundColor: "rgba(255,255,255,0.06)",
             border: "1px solid rgba(255,255,255,0.1)",
@@ -272,7 +272,7 @@ export const MemoryHierarchy: React.FC = () => {
               right: 8,
               top: "50%",
               transform: "translateY(-50%)",
-              fontSize: 13,
+              fontSize: 17,
               color: "rgba(255,255,255,0.5)",
               ...font,
             }}
@@ -307,13 +307,13 @@ export const MemoryHierarchy: React.FC = () => {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            padding: 40,
+            padding: 70,
           }}
         >
           {/* Section title */}
           <div
             style={{
-              fontSize: 32,
+              fontSize: 38,
               fontWeight: 700,
               color: "rgba(255,255,255,0.85)",
               marginBottom: 36,
@@ -359,10 +359,10 @@ export const MemoryHierarchy: React.FC = () => {
           <div style={{ opacity: rightTitleOpacity }}>
             <div
               style={{
-                fontSize: 28,
+                fontSize: 34,
                 fontWeight: 700,
                 color: "#e0e0e0",
-                marginBottom: 20,
+                marginBottom: 28,
                 ...font,
               }}
             >
@@ -399,10 +399,10 @@ export const MemoryHierarchy: React.FC = () => {
           <div style={{ opacity: rightTitleOpacity }}>
             <div
               style={{
-                fontSize: 28,
+                fontSize: 34,
                 fontWeight: 700,
                 color: "#e0e0e0",
-                marginBottom: 20,
+                marginBottom: 28,
                 ...font,
               }}
             >
