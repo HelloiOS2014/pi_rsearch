@@ -1,0 +1,274 @@
+---
+title: "边界与信任"
+chapter: 11
+description: "如何让 Agent 的行动值得信赖：防御性工具工程、沙箱、权限"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+import CodeComparison from '../../components/tutorial/CodeComparison';
+
+export const codeEditThreeStage = `// edit 工具的三阶段匹配：exact → fuzzy → error
+function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
+  // 第一阶段：精确匹配
+  const exactIndex = content.indexOf(oldText);
+  if (exactIndex !== -1) {
+    return { found: true, index: exactIndex,
+      matchLength: oldText.length, usedFuzzyMatch: false,
+      contentForReplacement: content };
+  }
+
+  // 第二阶段：fuzzy 匹配（normalize 后重试）
+  const fuzzyContent = normalizeForFuzzyMatch(content);
+  const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+  const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
+
+  if (fuzzyIndex === -1) {
+    return { found: false, index: -1, matchLength: 0,
+      usedFuzzyMatch: false, contentForReplacement: content };
+  }
+
+  // fuzzy 匹配成功 — 在 normalized 空间做替换
+  return { found: true, index: fuzzyIndex,
+    matchLength: fuzzyOldText.length, usedFuzzyMatch: true,
+    contentForReplacement: fuzzyContent };
+}`;
+
+export const codeNormalize = `// normalizeForFuzzyMatch — 抹平 token 空间与 byte 空间的差异
+function normalizeForFuzzyMatch(text: string): string {
+  return text
+    .normalize("NFKC")
+    // 去除每行尾部空白
+    .split("\\n").map(line => line.trimEnd()).join("\\n")
+    // 智能单引号 → 普通单引号
+    .replace(/[\\u2018\\u2019\\u201A\\u201B]/g, "'")
+    // 智能双引号 → 普通双引号
+    .replace(/[\\u201C\\u201D\\u201E\\u201F]/g, '"')
+    // 各种 dash/hyphen → ASCII hyphen
+    .replace(/[\\u2010-\\u2015\\u2212]/g, "-")
+    // 特殊空格 → 普通空格
+    .replace(/[\\u00A0\\u2002-\\u200A\\u202F\\u205F\\u3000]/g, " ");
+}`;
+
+export const codeBashExec = `// bash 工具 — spawn + rolling buffer + timeout + kill
+const child = spawn(shell, [...args, command], {
+  cwd, detached: true,
+  env: env ?? getShellEnv(),
+  stdio: ["ignore", "pipe", "pipe"],
+});
+
+let timedOut = false;
+let timeoutHandle: NodeJS.Timeout | undefined;
+if (timeout !== undefined && timeout > 0) {
+  timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    if (child.pid) killProcessTree(child.pid);  // 超时就杀整棵进程树
+  }, timeout * 1000);
+}
+
+// 滚动缓冲区：只保留最后 maxChunksBytes
+const chunks: Buffer[] = [];
+let chunksBytes = 0;
+const maxChunksBytes = DEFAULT_MAX_BYTES * 2; // 100KB
+
+child.stdout?.on("data", (data) => {
+  chunks.push(data);
+  chunksBytes += data.length;
+  while (chunksBytes > maxChunksBytes && chunks.length > 1) {
+    chunksBytes -= chunks.shift()!.length;  // 丢弃最旧的 chunk
+  }
+});`;
+
+export const codeTruncate = `// truncateHead — 文件读取，保留开头
+function truncateHead(content: string, options = {}): TruncationResult {
+  const maxLines = options.maxLines ?? 2000;
+  const maxBytes = options.maxBytes ?? 50 * 1024; // 50KB
+  // 逐行累加，哪个限制先到就停
+  for (let i = 0; i < lines.length && i < maxLines; i++) {
+    const lineBytes = Buffer.byteLength(line, "utf-8") + (i > 0 ? 1 : 0);
+    if (outputBytes + lineBytes > maxBytes) { truncatedBy = "bytes"; break; }
+    outputLines.push(line); outputBytes += lineBytes;
+  }
+  return { content: outputLines.join("\\n"), truncated: true, truncatedBy };
+}
+
+// truncateTail — bash 输出，保留结尾（错误信息在最后）
+function truncateTail(content: string, options = {}): TruncationResult {
+  // 从末尾往回收集，逻辑对称
+  for (let i = lines.length - 1; i >= 0 && outputLines.length < maxLines; i--) {
+    if (outputBytes + lineBytes > maxBytes) { truncatedBy = "bytes"; break; }
+    outputLines.unshift(line); outputBytes += lineBytes;
+  }
+}`;
+
+export const codeFileMutationQueue = `// 文件变更队列 — Promise 链保证同文件串行，不同文件并行
+const fileMutationQueues = new Map<string, Promise<void>>();
+
+async function withFileMutationQueue<T>(
+  filePath: string, fn: () => Promise<T>
+): Promise<T> {
+  const key = await getMutationQueueKey(filePath); // realpath 解析符号链接
+  const currentQueue = fileMutationQueues.get(key) ?? Promise.resolve();
+
+  let releaseNext!: () => void;
+  const nextQueue = new Promise<void>(resolve => { releaseNext = resolve; });
+  fileMutationQueues.set(key, currentQueue.then(() => nextQueue));
+
+  await currentQueue;  // 等前面的操作完成
+  try {
+    return await fn(); // 执行本次变更
+  } finally {
+    releaseNext();     // 释放下一个等待者
+    // 清理：如果队列尾部就是自己，删除整个条目
+    if (fileMutationQueues.get(key) === currentQueue.then(() => nextQueue)) {
+      fileMutationQueues.delete(key);
+    }
+  }
+}`;
+
+export const codePathResolve = `// resolveReadPath — 5 种变体尝试，解决 LLM 路径幻觉
+function resolveReadPath(filePath: string, cwd: string): string {
+  const resolved = resolveToCwd(filePath, cwd);
+
+  if (fileExists(resolved)) return resolved;
+
+  // 变体 1: macOS 截图 AM/PM 前的 narrow no-break space
+  const amPmVariant = tryMacOSScreenshotPath(resolved);
+  if (amPmVariant !== resolved && fileExists(amPmVariant)) return amPmVariant;
+
+  // 变体 2: macOS NFD 分解形式（é → e + ́）
+  const nfdVariant = tryNFDVariant(resolved);
+  if (nfdVariant !== resolved && fileExists(nfdVariant)) return nfdVariant;
+
+  // 变体 3: macOS 弯引号（Capture d\u2019ecran）
+  const curlyVariant = tryCurlyQuoteVariant(resolved);
+  if (curlyVariant !== resolved && fileExists(curlyVariant)) return curlyVariant;
+
+  // 变体 4: NFD + 弯引号组合（法语 macOS 截图）
+  const nfdCurlyVariant = tryCurlyQuoteVariant(nfdVariant);
+  if (nfdCurlyVariant !== resolved && fileExists(nfdCurlyVariant)) return nfdCurlyVariant;
+
+  return resolved; // 都不匹配，返回原始路径（让后续报错）
+}`;
+
+export const codeErrorBad = `// 糟糕的错误信息 — 给人类看的
+throw new Error("Edit failed");
+// 或者更常见的：
+throw new Error("String not found in file");
+// LLM 看到这个后会做什么？
+// → 重试相同的操作（因为不知道为什么失败）
+// → 循环 5 次，每次都失败`;
+
+export const codeErrorGood = `// Pi 的错误信息 — 给 LLM 看的，包含修复指令
+throw new Error(
+  \`Found \${occurrences} occurrences of the text in \${path}. \` +
+  \`The text must be unique. \` +
+  \`Please provide more context to make it unique.\`
+);
+
+// 另一个例子：
+throw new Error(
+  \`Could not find the exact text in \${path}. \` +
+  \`The old text must match exactly \` +
+  \`including all whitespace and newlines.\`
+);
+// LLM 看到后：知道原因 + 知道怎么修`;
+
+## Agent 做错了，甚至做了危险的事
+
+> 你的控制回路跑起来了。Ch10 的事件队列在分发，重试机制在工作，上下文压缩在保护记忆。你觉得 Agent 终于可以独当一面了。
+>
+> 于是你给了它一个真实任务：重构一个 TypeScript 项目，把散落在 8 个文件里的旧版 API 调用迁移到新 SDK。
+>
+> **第 3 分钟**，Agent 尝试编辑 `config.ts`。文件里有一对中文智能引号 `"production"`，Agent 在 diff 里用了普通引号 `"production"`。编辑失败。Agent 重试了一遍，用了完全相同的 oldText——当然又失败了。然后第三遍，第四遍。你意识到它永远无法成功，因为它根本看不到两种引号的区别——在 token 空间，它们可能是同一个东西，但在 byte 空间，它们是完全不同的字符。
+>
+> **第 7 分钟**，Agent 执行了一条 `grep -r "oldApi" .`。这个项目有 `node_modules`，grep 返回了 47MB 的输出。你的终端卡了 20 秒，然后 Agent 的上下文被这坨输出淹没了——它把接下来的两分钟花在"分析" grep 结果上，输出了一份没人需要的依赖关系报告。真正需要改的 8 个文件被挤出了上下文窗口。
+>
+> **第 12 分钟**，Agent 在等一条 `npm install` 完成。没有设超时。安装过程因为一个 registry 问题挂住了。你等了 10 分钟才发现 Agent 还停在那里。你没有任何选项——进程没有超时，也没有 kill 的逻辑。你只能 Ctrl+C 重来。
+>
+> **第 18 分钟**（重启后），Agent 读取了用户上传的一张截图路径 `~/Desktop/Capture d'écran 2024-01-15.png`。读取失败——`File not found`。文件明明在那里。你花了 5 分钟排查，发现 macOS 在文件名里用了 NFD 编码的 `é` 和一个 Unicode 弯引号 `'`，而 Agent 输出的路径用了 NFC 编码的 `é` 和直引号 `'`。肉眼完全看不出区别。
+>
+> **第 22 分钟**，你看到 Agent 执行了 `rm -rf ./src`。你的心跳停了一拍。幸好它只删除了 `./src/tmp`——但你在两秒钟的恐惧中意识到，你对 Agent 的文件操作没有任何防护。它有 bash 的全部权限。它随时可以执行 `rm -rf /`，而你唯一的保护是"LLM 大概不会这么做吧"。
+>
+> 你坐回椅子里，看着终端上闪烁的光标。
+>
+> 你的 Agent 能行动了，但它的行动不值得信赖。
+
+---
+
+## 为什么会痛：边界鸿沟与信任鸿沟
+
+回顾 Ch9 的理论框架，这一章的所有痛点都可以归结为两条鸿沟。
+
+**边界鸿沟：token 空间 ≠ byte 空间。** LLM 在 token 空间中推理——它处理的是语义单元，不是字节。当它生成一个引号字符时，它输出的是"引号"这个概念，而不是 U+0022 还是 U+201C。但文件系统在 byte 空间中运作——`"` 和 `"` 是完全不同的字节序列。智能引号、Unicode 空格、NFD/NFC 编码差异，这些都是 token 空间和 byte 空间之间的裂缝。每一次跨越这条边界的操作——edit、read、path resolve——都需要一个翻译层来弥合差异。
+
+**信任鸿沟：能力越大，风险越大。** Agent 必须拥有足够的权限才能有用——它需要读写文件、执行命令、修改代码。但给予权限意味着给予破坏的能力。你不能让 Agent 执行 `rm -rf /`，但你也不能禁止它执行 `rm`——因为合法的清理操作需要它。信任不是二元的（全信任 / 零信任），它是一个连续的光谱，需要细粒度的架构设计。
+
+**理论锚点：成本反转预测工具数量。** Ch9 提出的成本反转原理在这里有一个直接推论：工具越少，每个工具的可靠性越容易保证。Pi 用 4 个默认工具覆盖了 Vercel AI SDK 15 个工具的功能。这不是"功能不足"——是刻意的约束。工具数量和可靠性之间的关系是乘法的，不是加法的。
+
+---
+
+## 复合错误率：为什么可靠性是乘法而不是加法
+
+一个 10 步的任务中，如果每一步的成功率是 85%（这已经是相当不错的单步可靠性了），那么整个任务的成功率是：
+
+**0.85^10 = 19.7%**
+
+五次中有四次失败。不是因为任何一步"特别差"，而是因为错误率在链式任务中是相乘的。这就是为什么从 85% 提升到 95% 不是"提高了 10%"——在 10 步任务中，它意味着从 19.7% 跃升到 59.9%。而从 95% 到 99%，任务成功率从 59.9% 变为 90.4%。
+
+每个工具的每一个百分点的可靠性改进，都被链式任务放大了。这是防御性工具工程存在的根本原因。
+
+---
+
+## 防御性工具工程的七条原则
+
+Pi 的工具系统不是一组"恰好能用"的实现。它们是一套经过深思熟虑的防御性工程——每个设计决策都在回答同一个问题：如何让 Agent 的行动值得信赖？
+
+**1. 架构约束优于行为约束。** 不要在 prompt 里写"请不要编辑没读过的文件"——在代码里强制执行。Pi 的 edit 工具要求 `oldText` 精确匹配文件内容；如果 Agent 没有先用 read 工具看过文件，它不可能知道要替换什么文本。这不是"建议"，是架构级的不可能性。行为约束依赖 LLM 的遵从性（脆弱的），架构约束依赖代码的不变量（坚固的）。
+
+**2. 歧义时失败。** 如果 edit 工具找到了 3 处匹配，它不会"猜一个最可能的"——它直接拒绝操作，返回错误信息。歧义是 bug 的温床；宁可让 Agent 多提供一些上下文重试，也不要让它在错误的位置做出不可逆的修改。Pi 的 `fuzzyFindText` 在 fuzzy 匹配成功后，还会用 `normalizeForFuzzyMatch` 检查 occurrence 数量——如果大于 1，直接报错。
+
+**3. 可自修复的错误信息。** 错误消息不是给人看的——是给 LLM 看的。一个好的工具错误信息应该告诉 LLM 三件事：发生了什么、为什么发生、怎么修复。Pi 的 edit 错误信息 `"Found 3 occurrences of the text. The text must be unique. Please provide more context to make it unique."` 就是这个模式——LLM 读到它就知道该加更多上下文重试。
+
+**4. 最小化工具集。** Pi 默认提供 4 个工具：`bash`、`edit`、`read`、`glob`。不是 15 个，不是 25 个。工具越多，LLM 选择错误工具的概率越高，工具之间的交互越复杂，测试矩阵越大。4 个精心设计的工具，胜过 15 个"差不多能用"的工具。
+
+**5. 分离获取与变更。** Read 操作是免费的——Agent 可以不受限制地读取文件、搜索代码、浏览目录。但 Write 操作是受控的——edit 需要精确匹配，bash 可以被权限系统拦截。这种不对称是刻意的：鼓励 Agent 多看多读（信息越多决策越好），同时约束它的变更行为（每次写入都是一个风险点）。
+
+**6. 输出截断是一等公民。** 截断不是"输出太长了就砍一刀"的补丁——它是 Pi 工具系统中的核心设计。`truncateHead` 用于文件读取（保留开头，因为文件结构在开头），`truncateTail` 用于 bash 输出（保留结尾，因为错误信息在最后）。两个函数都有双重限制：行数（2000 行）和字节数（50KB），哪个先到就停。超出部分保存到临时文件，并在输出末尾附上路径——Agent 需要时可以自己去读。
+
+**7. Operations 抽象。** 每个工具的 I/O 操作都通过一个 `Operations` 接口注入，而不是硬编码 `fs.readFile`。这意味着同一个 edit 工具可以操作本地文件系统，也可以通过 SSH 操作远程文件，也可以在沙箱中运行——工具逻辑与执行环境完全解耦。这不是过度设计，是信任边界的基础设施：当你需要在不同信任级别的环境中运行同一个 Agent 时，你只需要替换 Operations 实现。
+
+---
+
+## 错误消息工程：给 LLM 写错误信息
+
+传统软件中，错误消息的读者是人类开发者。Agent 系统中，错误消息的首要读者是 LLM。这个转变意味着完全不同的设计标准。
+
+<CodeComparison client:visible
+  left={{ code: codeErrorBad, label: "传统错误信息", language: "typescript" }}
+  right={{ code: codeErrorGood, label: "Pi 的错误信息", language: "typescript" }}
+/>
+
+差别不在字数，在于**可操作性**。左边的错误信息是一个终止信号——LLM 读到它只能选择重试或放弃。右边的错误信息是一个修复指令——LLM 读到它知道问题是什么（多处匹配），知道规则是什么（必须唯一），知道怎么修（提供更多上下文）。
+
+这不是理论推测。Aider 和 Cline 的实践数据显示，精心设计的工具错误信息可以将 Agent 自修复成功率提高 10-25%。在复合错误率的背景下，每个工具的 10% 改进，意味着 10 步任务成功率从 35% 跳到 50%。
+
+关键设计原则：
+
+- **包含原因**：不是 "failed"，是 "found 3 occurrences"
+- **包含规则**：不是隐含的，是 "text must be unique"
+- **包含修复路径**：不是 "try again"，是 "provide more context to make it unique"
+- **包含上下文**：文件路径、匹配数量、当前值——LLM 需要的所有信息
+
+---
+
+## 循环检测
+
+Pi 目前没有实现循环检测。但这是业界公认的关键防御机制，值得了解其模式。
+
+典型的循环检测需要回答一个问题：**Agent 是否在用相同的方式重复做同一件失败的事？** StrongDM 的 Attractor spec 定义了一种 "attractor state" 检测方法——如果 Agent 最近 N 次工具调用的输入/输出模式形成了一个循环（相同的 tool name + 相似的参数 + 相同的错误），则触发强制退出或策略切换。
+
+实现不复杂：维护一个滑动窗口，对每次工具调用做 fingerprint（工具名 + 参数 hash + 结果 hash），当窗口内出现 K 次相同 fingerprint 时触发告警。成本很低——几行代码，几百字节内存——但它能打破那个让你在终端前无奈看 Agent 循环 5 次的僵局。
+
+Pi 没有实现它，可能是因为"理解每一行"的极简哲学——如果用户场景中循环足够罕见，这个复杂度不值得引入。但对于生产级 Agent，这几乎是必需品。
+
+---
