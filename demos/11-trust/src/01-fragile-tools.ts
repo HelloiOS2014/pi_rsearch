@@ -1,10 +1,6 @@
-import { printSection, printEvent } from "@pi-tutorial/shared";
-import * as path from "path";
-import { fileURLToPath } from "url";
+import { printSection } from "@pi-tutorial/shared";
 
 printSection("Demo 11-01: 脆弱的工具");
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ===== Test 1: Edit with exact matching (fragile) =====
 console.log("\n📝 测试 1：精确匹配编辑\n");
