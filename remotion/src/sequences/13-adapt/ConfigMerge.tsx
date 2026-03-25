@@ -197,8 +197,8 @@ export const ConfigMerge: React.FC = () => {
         style={{
           opacity: appear,
           transform: `translateY(${yOffset}px)`,
-          width: 500,
-          padding: "20px 32px",
+          width: 650,
+          padding: "22px 36px",
           borderRadius: 10,
           border: `1px solid ${layer.color}55`,
           backgroundColor: `${layer.color}10`,
@@ -405,26 +405,17 @@ export const ConfigMerge: React.FC = () => {
       {phaseLabel("Object Merge", BLUE, 110, 155)}
       {phaseLabel("Array Replace", YELLOW, 160, 200)}
 
-      {/* Main layout */}
+      {/* Left: Config layers — absolute positioned */}
       <div
         style={{
+          position: "absolute",
+          left: 120,
+          top: 120,
           display: "flex",
-          width: "100%",
-          height: "100%",
-          alignItems: "center",
-          justifyContent: "center",
+          flexDirection: "column",
+          gap: 48,
         }}
       >
-        {/* Left: Config layers */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 28,
-            marginRight: 80,
-          }}
-        >
           {layers.map((layer, i) => (
             <React.Fragment key={layer.label}>
               {renderCard(layer, i)}
@@ -448,22 +439,20 @@ export const ConfigMerge: React.FC = () => {
           ))}
         </div>
 
-        {/* Right: Merged result */}
-        {frame >= 200 && (
-          <div
-            style={{
-              opacity: resultAppear,
-              transform: `scale(${interpolate(resultAppear, [0, 1], [0.85, 1])})`,
-            }}
-          >
-            {/* Arrow pointing to result */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 20,
-              }}
-            >
+      {/* Right: Merged result — absolute positioned */}
+      {frame >= 200 && (
+        <div
+          style={{
+            position: "absolute",
+            right: 150,
+            top: 200,
+            opacity: resultAppear,
+            transform: `scale(${interpolate(resultAppear, [0, 1], [0.85, 1])})`,
+            display: "flex",
+            alignItems: "center",
+            gap: 20,
+          }}
+        >
               <svg
                 width="100"
                 height="40"
@@ -483,8 +472,8 @@ export const ConfigMerge: React.FC = () => {
 
               <div
                 style={{
-                  width: 520,
-                  padding: "28px 40px",
+                  width: 630,
+                  padding: "32px 44px",
                   borderRadius: 12,
                   border: `2px solid ${GREEN}`,
                   backgroundColor: `${GREEN}08`,
@@ -535,11 +524,9 @@ export const ConfigMerge: React.FC = () => {
                     </span>
                   </div>
                 ))}
-              </div>
-            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </AbsoluteFill>
   );
 };
