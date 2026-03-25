@@ -1,0 +1,435 @@
+---
+title: "交付"
+chapter: 14
+description: "如何将 Agent 送达不同环境的用户：多模式、Hook、生产部署"
+---
+
+import SourceReader from '../../components/tutorial/SourceReader';
+
+export const codePrintMode = `// Print Mode — 125 行代码的完整 CLI 交付
+// 核心：subscribe + prompt + output
+
+export async function runPrintMode(
+  session: AgentSession,
+  options: PrintModeOptions
+): Promise<void> {
+  const { mode, messages = [], initialMessage, initialImages } = options;
+
+  // JSON 模式：先输出 header（session 元数据）
+  if (mode === "json") {
+    const header = session.sessionManager.getHeader();
+    if (header) console.log(JSON.stringify(header));
+  }
+
+  // 绑定 extensions（print mode 没有 UI）
+  await session.bindExtensions({
+    commandContextActions: {
+      waitForIdle: () => session.agent.waitForIdle(),
+      newSession: async (options) => { /* ... */ },
+      fork: async (entryId) => { /* ... */ },
+    },
+    onError: (err) => console.error(\`Extension error: \${err.error}\`),
+  });
+
+  // 关键一行：订阅事件 → 输出 JSON
+  session.subscribe((event) => {
+    if (mode === "json") {
+      console.log(JSON.stringify(event));
+    }
+  });
+
+  // 发送初始消息
+  if (initialMessage) {
+    await session.prompt(initialMessage, { images: initialImages });
+  }
+  // 发送后续消息
+  for (const message of messages) {
+    await session.prompt(message);
+  }
+
+  // Text 模式：只输出最终文本响应
+  if (mode === "text") {
+    const state = session.state;
+    const lastMessage = state.messages[state.messages.length - 1];
+    if (lastMessage?.role === "assistant") {
+      for (const content of lastMessage.content) {
+        if (content.type === "text") console.log(content.text);
+      }
+    }
+  }
+
+  // 确保 stdout 完全 flush
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write("", (err) => {
+      if (err) reject(err); else resolve();
+    });
+  });
+}`;
+
+export const codeRpcProtocol = `// RPC Mode — JSON stdin/stdout 协议，用于 IDE 集成
+// 核心：stdout 重定向 + 自定义 JSONL parser + 事件订阅
+
+export async function runRpcMode(session: AgentSession): Promise<never> {
+  // 关键：劫持 stdout，原始 stdout 只用于 RPC 输出
+  const rawStdoutWrite = process.stdout.write.bind(process.stdout);
+  const rawStderrWrite = process.stderr.write.bind(process.stderr);
+  // Agent 内部的 console.log 重定向到 stderr
+  process.stdout.write = ((...args) => rawStderrWrite(...args));
+
+  const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
+    rawStdoutWrite(serializeJsonLine(obj));  // LF-only JSONL
+  };
+
+  // Extension UI：通过 RPC 异步请求/响应
+  const pendingExtensionRequests = new Map<string, { resolve, reject }>();
+  const createExtensionUIContext = (): ExtensionUIContext => ({
+    select: (title, options, opts) =>
+      createDialogPromise(opts, undefined, { method: "select", title, options }),
+    confirm: (title, message, opts) =>
+      createDialogPromise(opts, false, { method: "confirm", title, message }),
+    // 不支持的方法 → stub 返回，不抛异常
+    onTerminalInput: () => () => {},
+    setWorkingMessage: (_msg) => {},  // no-op
+    setFooter: (_factory) => {},      // no-op
+  });
+
+  // 订阅所有事件 → 通过 RPC 输出
+  session.subscribe((event) => output(event));
+
+  // 自定义 JSONL reader（Node readline 会在 U+2028/U+2029 处断行）
+  attachJsonlLineReader(process.stdin, (line) => {
+    const command = JSON.parse(line) as RpcCommand;
+    handleCommand(command).then(output);
+  });
+}`;
+
+export const codeSdkFactory = `// SDK — createAgentSession() 工厂函数
+// 外部消费者通过这个入口创建 AgentSession
+
+interface CreateAgentSessionOptions {
+  cwd?: string;                  // 工作目录，默认 process.cwd()
+  agentDir?: string;             // 全局配置目录，默认 ~/.pi/agent
+  model?: Model<any>;            // 指定模型
+  thinkingLevel?: ThinkingLevel; // 推理强度
+  tools?: Tool[];                // 内置工具，默认 [read, bash, edit, write]
+  customTools?: ToolDefinition[];// 自定义工具
+  sessionManager?: SessionManager;  // 会话持久化
+  settingsManager?: SettingsManager;// 用户设置
+  resourceLoader?: ResourceLoader;  // 资源加载
+}
+
+// 最简用法
+const { session } = await createAgentSession();
+
+// 指定模型
+const { session } = await createAgentSession({
+  model: getModel('anthropic', 'claude-opus-4-5'),
+  thinkingLevel: 'high',
+});
+
+// 完全控制
+const { session } = await createAgentSession({
+  model: myModel,
+  tools: [readTool, bashTool],
+  resourceLoader: loader,
+  sessionManager: SessionManager.inMemory(), // 内存会话，不持久化
+});
+
+// 所有模式共享同一个 session
+session.subscribe(callback);     // 事件订阅
+await session.prompt("...");     // 发送消息
+session.state;                   // 读取状态`;
+
+## 只有我一个人能用这个 Agent
+
+> 你的 Agent 已经过了五关：它有可控的控制回路（Ch10），明确的安全边界（Ch11），跨会话的记忆（Ch12），可适应不同环境的配置层（Ch13）。你在终端里用 `pi -p "重构这个模块"` ，它完美执行。
+>
+> 然后你需要把它集成到 CI pipeline——每次 PR 自动 code review。但 CI 里没有终端，没有交互式输入，只有 stdin/stdout。
+>
+> 然后 IDE 团队想嵌入它——用户在 VS Code 里直接和 Agent 对话。但 IDE 需要双向通信：发送命令、接收事件、弹出确认对话框。一个简单的 pipe 不够。
+>
+> 然后安全团队要求：任何 `rm -rf` 命令必须经过审批，所有文件修改必须记录审计日志，某些目录绝对禁止写入。你需要在 Agent 和工具之间插入一个"检查站"。
+>
+> 然后同事想看你昨天那个精彩的 debug session——Agent 是怎么一步步定位到那个并发 bug 的。但 session 数据是二进制树，不是人类可读的格式。
+>
+> **Agent 已经足够强大，但只有你一个人能用它。** 从终端到 CI、从 CLI 到 IDE、从个人工具到团队基础设施——这是最后一个鸿沟。
+
+---
+
+## 为什么会痛
+
+回到洋葱模型的最外层。前四章从内向外构建：控制回路（核心循环）→ 边界与信任（工具层）→ 记忆（状态层）→ 适应（配置层）。交付是最外层——Agent 如何到达用户手中。
+
+核心架构洞察：**Agent 核心是无 I/O 观点的库。它不知道也不关心谁在消费输出。** 事件订阅模式是关键——一个 `subscribe` 就是一种交付模式。Interactive Mode subscribe 后更新 TUI 组件；Print Mode subscribe 后 `console.log(JSON.stringify(event))`；RPC Mode subscribe 后写入 stdout。核心逻辑完全相同，只有最后的"输出到哪里"不同。
+
+**理论锚点：控制系统——一个被控对象（AgentSession），多个观察者（Observer）。** 不同的交付模式就是不同的观察者，它们订阅相同的事件流，做不同的渲染。
+
+---
+
+## 业界怎么解决
+
+交付的第一个选择是**传输协议**：
+
+| 协议 | 适用场景 | 延迟 | 方向 | 备注 |
+|------|---------|------|------|------|
+| stdio (JSON Lines) | CLI、IDE 插件、子进程 | 最低 | 双向 | 最简单，最可靠，MCP 的默认传输 |
+| Streamable HTTP | Web 应用、远程服务 | 中 | 双向 | MCP 新标准，替代 SSE |
+| WebSocket | 实时协作、多客户端 | 低 | 双向 | 连接管理复杂 |
+| ~~SSE~~ | ~~Web 单向推送~~ | - | ~~单向~~ | MCP 已废弃——无法从客户端发消息 |
+
+MCP 废弃 SSE 的原因值得记住：SSE 是单向的（server → client），客户端发消息需要额外的 HTTP 请求，无法保证消息顺序。Streamable HTTP 用单个 endpoint 支持双向通信，更简洁。
+
+SDK 设计是第二个维度。Claude Agent SDK 的 `query()` 返回 async iterator，消费者遍历 5 种消息类型（`text`、`tool_use`、`tool_result`、`thinking`、`error`）。这个设计让消费端的代码极其简洁——一个 `for await` 循环就能处理整个对话。
+
+第三个维度是 **Hook**——不是杂项功能，而是**外部消费者控制 Agent 的主要可编程接口**。Claude Code 定义了 18 个事件钩子 × 4 种 handler 类型（command/http/prompt/agent），形成了一个完整的"可编程控制面"。IDE 插件通过 Hook 实现自定义审批流，CI 通过 Hook 实现自动化策略。
+
+---
+
+## Pi 的三种模式，一个 AgentSession
+
+Pi 的所有交付模式都通过同一个接口连接：`session.subscribe(callback)`。不同模式的区别仅在于谁调用 `subscribe`、callback 里做什么、以及如何触发 `session.prompt()`。
+
+### Interactive Mode（4,570 行）
+
+最完整的模式：full TUI，实时 streaming，键盘快捷键，主题切换。事件到达后驱动 Ink 组件更新——`streamingComponent` 逐 token 累积渲染。这是面向人类的交互界面，也是最大的模式，因为 UI 复杂度远超协议复杂度。
+
+### Print Mode（125 行）
+
+这是事件订阅模式威力的最佳展示。
+
+<SourceReader client:visible
+  filename="modes/print-mode.ts"
+  language="typescript"
+  code={codePrintMode}
+  highlights={[
+    { line: 10, note: "两种输出模式：text（只要最终文本）/ json（完整事件流）" },
+    { line: 21, note: "绑定 extensions 但没有 UI context——print mode 没有弹窗能力" },
+    { line: 29, note: "核心一行：subscribe → JSON.stringify → stdout" },
+    { line: 34, note: "prompt() 触发 Agent 推理，事件自动通过 subscribe 输出" },
+    { line: 43, note: "Text 模式：只提取最后一条 assistant 消息的文本内容" },
+    { line: 54, note: "确保 stdout flush——避免进程退出时丢失最后几行输出" },
+  ]}
+/>
+
+**125 行代码服务一个完整的 CLI 交付界面——这就是事件订阅模式的威力。** `pi -p "explain this function"` 走 text 模式，只输出最终文本；`pi --mode json "refactor this"` 走 json 模式，输出完整事件流供 pipe 消费。核心逻辑就是 `session.subscribe` + `session.prompt` + `console.log`。
+
+### RPC Mode（646 行）
+
+IDE 集成需要比 pipe 更丰富的协议。RPC Mode 通过 JSON stdin/stdout 实现双向通信，支持命令（prompt、abort、get_state）和事件（agent events、extension UI requests）的交错传输。
+
+<SourceReader client:visible
+  filename="modes/rpc/rpc-mode.ts"
+  language="typescript"
+  code={codeRpcProtocol}
+  highlights={[
+    { line: 5, note: "劫持 stdout：Agent 内部的 console.log 重定向到 stderr" },
+    { line: 10, note: "只有 RPC 消息走真正的 stdout——保证协议纯净" },
+    { line: 15, note: "Extension UI 通过 async request/response 模式实现" },
+    { line: 24, note: "不支持的方法返回 stub，不抛异常——优雅降级" },
+    { line: 30, note: "和 Print Mode 一样的一行：subscribe → output" },
+    { line: 33, note: "自定义 JSONL parser：Node readline 在 U+2028/U+2029 处断行" },
+  ]}
+/>
+
+为什么不用 Node.js 的 `readline`？因为 `readline` 把 U+2028（Line Separator）和 U+2029（Paragraph Separator）也当作换行符——但这两个字符在 JSON 字符串中是合法内容。一个包含 Unicode 文本的 tool result 会被错误地拆分成多行，破坏 JSON 解析。Pi 实现了自己的 LF-only JSONL parser，只在 `\n` 处分割。
+
+### SDK（376 行）
+
+对于需要在进程内嵌入 Agent 的场景（测试框架、自定义应用），SDK 提供 `createAgentSession()` 工厂函数。
+
+<SourceReader client:visible
+  filename="core/sdk.ts"
+  language="typescript"
+  code={codeSdkFactory}
+  highlights={[
+    { line: 5, note: "所有参数可选——最简用法零配置" },
+    { line: 12, note: "工具列表默认 [read, bash, edit, write]，可完全替换" },
+    { line: 17, note: "最简用法：一行创建完整 session" },
+    { line: 20, note: "指定模型 + thinking level" },
+    { line: 25, note: "完全控制：自定义 tools + 内存会话" },
+    { line: 31, note: "返回的 session 和所有模式使用相同的 API" },
+  ]}
+/>
+
+SDK 消费者拿到 `session` 后，API 和其他模式完全一致：`subscribe` 监听事件，`prompt` 发送消息，`state` 读取当前状态。这不是巧合——这是架构的核心约束：**所有模式共享一个 AgentSession 实例，通过同一组方法交互。**
+
+### Extension UI 的优雅降级
+
+三种模式对 Extension UI 的支持不同。Interactive Mode 有完整的 TUI，可以弹出 select/confirm/input 对话框。RPC Mode 通过 async request/response 把 UI 请求转发给宿主（IDE），宿主实现自己的 UI。Print Mode 没有 UI 能力——`bindExtensions` 时不传 `uiContext`。
+
+关键设计：不支持的方法返回 stub 值（空字符串、false、undefined），不抛异常。Extension 通过 `hasUI` 检查当前模式是否支持 UI，自行决定降级策略。这意味着同一个 extension 可以在三种模式下运行——有 UI 时弹确认框，无 UI 时自动同意或跳过。
+
+---
+
+## Hook 系统：交付层的可编程控制面
+
+Hook 不是"附加功能"——它是**外部消费者控制 Agent 行为的主要机制**。没有 Hook，你只能被动观察事件流；有了 Hook，你可以在关键节点拦截、修改、甚至阻止 Agent 的行为。
+
+Claude Code 的 Hook 系统定义了 18 个事件 × 4 种 handler 类型：
+
+| Handler 类型 | 执行方式 | 适用场景 |
+|-------------|---------|---------|
+| command | 执行 shell 命令，用 exit code 控制行为 | 本地脚本、CI 集成 |
+| http | 调用 HTTP endpoint | 远程审批、集中策略 |
+| prompt | 发送额外 prompt 给 Agent | 动态注入上下文 |
+| agent | 启动子 Agent 处理 | 复杂决策、多步验证 |
+
+决策模型以 `PreToolUse` 为例——Agent 要执行工具前触发：
+
+```
+PreToolUse hook → allow    → 正常执行
+              → deny     → 阻止执行，返回错误消息
+              → modify   → 修改工具参数后执行
+              → inject   → 注入额外消息到上下文
+              → halt     → 终止整个 Agent 循环
+```
+
+生产级用例覆盖五个维度：**安全**（block `rm -rf /`、禁止写入 `.env`）、**质量**（edit 后自动 format、commit 前 lint）、**审计**（记录每次文件修改的 diff）、**上下文**（加载相关 Jira ticket）、**成本**（`stop` 前验证测试通过）。
+
+---
+
+## 展望：多 Agent 编排
+
+> 以下内容是前沿探索方向，**不在本教程 demo 范围内**。
+
+当单个 Agent 不够时，可以编排多个 Agent 协作。三种模式：
+
+- **Sub-agent（上下文隔离）：** 主 Agent 派生子 Agent 处理子任务，子 Agent 有独立的 context window，只有摘要返回主 Agent。Claude Code 的子 Agent 用较弱模型处理简单任务（文件搜索、格式化），主 Agent 聚焦高级推理。
+- **Handoff（所有权转移）：** Agent A 处理到某个阶段后，把完整上下文移交给 Agent B 继续。适合工作流有明确阶段边界的场景（设计 → 实现 → 测试）。
+- **Parallel Worktree（git 隔离）：** 每个 Agent 在独立的 git worktree 中工作，互不干扰。Cursor 的 Background Agent 支持 8 个并行 Agent。
+
+未解难题：端口冲突（多个 Agent 同时启动 dev server）、数据库竞态（并行写入同一个 DB）、环境变量冲突（不同 Agent 需要不同的 API key）。这些不是 Agent 问题，是分布式系统问题。
+
+Anthropic 的多 Agent 研究数据：质量提升 +90.2%，token 消耗 ~15x。质量提升来自多视角验证和错误恢复，但 token 成本说明这不是免费的午餐——需要在质量和成本之间找到平衡。
+
+---
+
+## 生产部署
+
+把 Agent 从开发环境搬到生产环境，需要解决三个问题：生命周期、状态、恢复。
+
+**三种部署模型：**
+
+| 模型 | 描述 | 适用 | 权衡 |
+|------|------|------|------|
+| Ephemeral | 每个任务启动一个容器，完成即销毁 | CI/CD、批处理 | 简单，但无状态 |
+| Long-running | 持久进程，处理多个请求 | IDE 集成、团队服务 | 有状态，但需要健康检查 |
+| Hybrid | Ephemeral 容器 + 外部状态存储 | 大规模部署 | 最灵活，架构最复杂 |
+
+**Session 恢复：** 捕获 `session_id`，下次创建 session 时传入 `continueSession: true` 或直接指定 `sessionManager` 指向同一存储路径。SessionManager 从磁盘恢复完整的 session tree，包括所有分支、压缩摘要、模型切换记录。
+
+**状态管理选择：** Redis（速度优先，适合 session 缓存）、Kubernetes StatefulSet（持久卷，适合需要文件系统的场景）、外部数据库（可扩展性优先，适合多实例共享 session）。没有通用最优——取决于你的可用性要求和运维能力。
+
+---
+
+## 测试你的 Harness
+
+Agent 的测试策略和传统软件不同——你不能断言"模型会输出这个文本"，因为模型输出不确定。正确的策略是**测试 Harness 逻辑，不测试模型智能**。
+
+| 策略 | 适用 | 方法 |
+|------|------|------|
+| Mock LLM | 控制回路、事件分发 | 固定响应序列，测试 subscribe 收到的事件顺序和内容 |
+| 快照测试 | Session 序列化 | 对比已知正确的 session tree 快照，检测序列化回归 |
+| 属性测试 | Edit fuzzy matching | 随机 Unicode 输入，验证 JSONL parser 不崩溃、edit tool 不丢字符 |
+| 集成测试 | 端到端流程 | Mock LLM + 真实文件系统，验证 read → edit → write 完整链路 |
+
+Mock LLM 是最高杠杆策略：固定模型返回 `{ tool_use: "bash", input: "ls" }`，然后验证 Harness 是否正确执行了 bash tool、是否触发了 PreToolUse hook、是否把 tool result 发回了模型。这测试的是你的 Harness 逻辑，不依赖任何外部服务。
+
+属性测试特别适合协议层：生成随机 JSON（包含 U+2028、U+2029、嵌套转义）→ `serializeJsonLine` → `attachJsonlLineReader` → 验证 round-trip 一致。
+
+---
+
+## 不同产品为什么做了不同选择
+
+| 维度 | Pi | Claude Agent SDK | OpenAI Agents SDK | LangGraph |
+|------|-----|-----------------|-------------------|-----------|
+| **交付模式** | Interactive + Print + RPC + SDK | SDK（async iterator） | SDK（Runner.run） | SDK + LangGraph Cloud |
+| **传输协议** | stdio（RPC）、in-process（SDK） | in-process | in-process + HTTP | HTTP + WebSocket |
+| **事件模型** | subscribe(callback) | async iterator（5 types） | RunResult + stream | State graph + checkpoints |
+| **Hook 机制** | Extension events | Hooks（18 events × 4 types） | Guardrails（input/output） | Interrupt nodes |
+| **IDE 集成** | RPC Mode（JSON stdin/stdout） | N/A（库） | N/A（库） | LangGraph Studio |
+| **UI 降级** | stub 返回 + hasUI 检查 | 无 UI 概念 | 无 UI 概念 | Studio 独立 |
+
+关键分歧：Pi 和 Claude Code 把**多模式交付**内建在 Harness 中——同一个 AgentSession 通过不同的 subscribe callback 服务不同场景。OpenAI 和 LangGraph 选择**纯 SDK 路线**——只提供库，UI 和协议由消费者实现。两种选择反映了不同的产品定位：前者是"完整的 Agent 产品"，后者是"Agent 构建工具"。
+
+---
+
+## 动手实现
+
+`demos/14-deliver/` 包含可运行的 demo：
+
+```bash
+# Demo 1: Print Mode — 事件流通过 pipe 输出
+npx tsx demos/14-deliver/src/01-print-mode.ts
+
+# Demo 2: RPC Mode — 双向 JSON 通信
+npx tsx demos/14-deliver/src/02-rpc-mode.ts
+
+# Demo 3: Hook — PreToolUse 拦截危险命令
+npx tsx demos/14-deliver/src/03-hooks.ts
+
+# Demo 4: HTML Export — 离线可查看的 session 报告
+npx tsx demos/14-deliver/src/04-html-export.ts
+```
+
+先运行 01 观察事件流格式，再运行 02 体验双向通信，03 验证 Hook 拦截机制，04 生成可在浏览器中查看的 session 报告。
+
+---
+
+## 元技能
+
+**症状识别：**
+- Agent 只能在特定环境（你的终端）中使用 → 缺少多模式交付
+- Agent 无法被脚本化调用 → 缺少 Print/RPC 模式
+- 无法在工具执行前插入策略检查 → 缺少 Hook 系统
+- 团队无法查看 Agent 的工作过程 → 缺少 session 导出
+
+**评估方法：** 数一下你的 Agent 有几种消费方式。如果答案是"只有一种"（交互式终端），你的 Agent 有交付鸿沟。理想状态是至少三种：人类交互（TUI/GUI）、程序消费（SDK/RPC）、批处理（Print/CLI）。
+
+---
+
+## 简化思考
+
+标准协议正在减少自定义 RPC 的必要性。MCP 定义了 tool 通信标准，Agent Skills 定义了能力描述标准。如果你的交付场景纯粹是"暴露工具给外部调用"，直接用 MCP server 可能比自己实现 RPC 更好——生态兼容性免费获得。
+
+但**事件订阅模式不可简化**。无论外部协议如何演变，Agent 内部的事件流（thinking → tool_use → tool_result → text）是基础架构。`session.subscribe(callback)` 这一层抽象会持续存在，因为它解耦了"Agent 做了什么"和"谁在看"。协议可以标准化，但观察者模式是永恒的。
+
+---
+
+## 检验标准
+
+- [ ] Print mode 通过 pipe 输出完整事件流
+- [ ] RPC mode 支持双向 JSON 通信（命令 + 事件交错）
+- [ ] PreToolUse hook 能拦截特定命令（如 `rm -rf`）
+- [ ] HTML export 在浏览器中离线可查看
+- [ ] 所有模式共享同一个 AgentSession 实例
+
+---
+
+## 毕业挑战
+
+> 用你在 Part 2 构建的 Harness 框架，给一个**非编码场景**构建完整 Harness。
+
+三个选项（选一个）：
+
+1. **研究助手：** Agent 帮用户搜索论文、摘要文献、追踪引用链。工具：web_search、read_pdf、write_notes。
+2. **数据分析师：** Agent 帮用户探索 CSV 数据、生成图表、发现异常。工具：load_csv、query_data、plot_chart。
+3. **客服机器人：** Agent 帮用户查询订单、处理退款、升级工单。工具：query_order、process_refund、escalate_ticket。
+
+你需要做的设计决策：
+
+- **工具设计（Ch3/Ch11）：** 哪些工具需要？输入输出 schema 是什么？哪些是只读的，哪些有副作用？
+- **信任层级（Ch11）：** 哪些操作自动执行？哪些需要确认？process_refund 的金额阈值怎么设？
+- **记忆策略（Ch12）：** 需要跨会话记忆吗？上下文超限时压缩什么、保留什么？
+- **适应配置（Ch13）：** 不同团队/客户需要不同的策略吗？用 settings 还是 CLAUDE.md？
+- **交付模式（Ch14）：** CLI？Web API？SDK？需要 Hook 吗？
+
+**评估标准：** 每一个设计决策都能追溯到五个鸿沟框架中的具体鸿沟。如果你不能解释"这个设计解决的是哪个鸿沟"，说明你在凭直觉而非框架思考。
+
+---
+
+## 回顾
+
+从 Ch9 的理论觉醒，到 Ch10 的控制回路，Ch11 的边界与信任，Ch12 的记忆与注意力，Ch13 的适应，到 Ch14 的交付——你走完了 Harness Engineering 的完整旅程。
+
+你不只学会了构建 Harness，更学会了一种工程思维：理解五个鸿沟，运用成本反转，以控制论的视角诊断问题，用"先减后加"的方法调优。这些能力不限于 Pi，不限于 coding agent——它们适用于任何需要把 AI 能力工程化为可靠产品的场景。
