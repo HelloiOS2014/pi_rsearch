@@ -203,9 +203,9 @@ Pi 的所有交付模式都通过同一个接口连接：`session.subscribe(call
   code={codePrintMode}
   highlights={[
     { line: 10, note: "两种输出模式：text（只要最终文本）/ json（完整事件流）" },
-    { line: 21, note: "绑定 extensions 但没有 UI context——print mode 没有弹窗能力" },
+    { line: 17, note: "绑定 extensions 但没有 UI context——print mode 没有弹窗能力" },
     { line: 29, note: "核心一行：subscribe → JSON.stringify → stdout" },
-    { line: 34, note: "prompt() 触发 Agent 推理，事件自动通过 subscribe 输出" },
+    { line: 35, note: "prompt() 触发 Agent 推理，事件自动通过 subscribe 输出" },
     { line: 43, note: "Text 模式：只提取最后一条 assistant 消息的文本内容" },
     { line: 54, note: "确保 stdout flush——避免进程退出时丢失最后几行输出" },
   ]}
@@ -222,12 +222,12 @@ IDE 集成需要比 pipe 更丰富的协议。RPC Mode 通过 JSON stdin/stdout 
   language="typescript"
   code={codeRpcProtocol}
   highlights={[
-    { line: 5, note: "劫持 stdout：Agent 内部的 console.log 重定向到 stderr" },
-    { line: 10, note: "只有 RPC 消息走真正的 stdout——保证协议纯净" },
+    { line: 6, note: "劫持 stdout：Agent 内部的 console.log 重定向到 stderr" },
+    { line: 11, note: "只有 RPC 消息走真正的 stdout——保证协议纯净" },
     { line: 15, note: "Extension UI 通过 async request/response 模式实现" },
     { line: 24, note: "不支持的方法返回 stub，不抛异常——优雅降级" },
-    { line: 30, note: "和 Print Mode 一样的一行：subscribe → output" },
-    { line: 33, note: "自定义 JSONL parser：Node readline 在 U+2028/U+2029 处断行" },
+    { line: 29, note: "和 Print Mode 一样的一行：subscribe → output" },
+    { line: 32, note: "自定义 JSONL parser：Node readline 在 U+2028/U+2029 处断行" },
   ]}
 />
 
@@ -243,11 +243,11 @@ IDE 集成需要比 pipe 更丰富的协议。RPC Mode 通过 JSON stdin/stdout 
   code={codeSdkFactory}
   highlights={[
     { line: 5, note: "所有参数可选——最简用法零配置" },
-    { line: 12, note: "工具列表默认 [read, bash, edit, write]，可完全替换" },
+    { line: 9, note: "工具列表默认 [read, bash, edit, write]，可完全替换" },
     { line: 17, note: "最简用法：一行创建完整 session" },
     { line: 20, note: "指定模型 + thinking level" },
-    { line: 25, note: "完全控制：自定义 tools + 内存会话" },
-    { line: 31, note: "返回的 session 和所有模式使用相同的 API" },
+    { line: 26, note: "完全控制：自定义 tools + 内存会话" },
+    { line: 34, note: "返回的 session 和所有模式使用相同的 API" },
   ]}
 />
 
@@ -359,20 +359,14 @@ Mock LLM 是最高杠杆策略：固定模型返回 `{ tool_use: "bash", input: 
 `demos/14-deliver/` 包含可运行的 demo：
 
 ```bash
-# Demo 1: Print Mode — 事件流通过 pipe 输出
-npx tsx demos/14-deliver/src/01-print-mode.ts
+# Demo 1: 痛点展示 — Agent 只能在终端用
+npx tsx demos/14-deliver/src/01-terminal-only.ts
 
-# Demo 2: RPC Mode — 双向 JSON 通信
-npx tsx demos/14-deliver/src/02-rpc-mode.ts
-
-# Demo 3: Hook — PreToolUse 拦截危险命令
-npx tsx demos/14-deliver/src/03-hooks.ts
-
-# Demo 4: HTML Export — 离线可查看的 session 报告
-npx tsx demos/14-deliver/src/04-html-export.ts
+# Demo 2: 多模式交付 — Print / RPC / Hook / HTML Export
+npx tsx demos/14-deliver/src/02-multi-mode.ts
 ```
 
-先运行 01 观察事件流格式，再运行 02 体验双向通信，03 验证 Hook 拦截机制，04 生成可在浏览器中查看的 session 报告。
+先运行 01 感受 Agent 和终端紧耦合的四个痛点场景，再运行 02 体验同一个 AgentCore 通过 `subscribe` 驱动四种交付模式——Print、RPC、Hook 拦截、HTML 导出。
 
 ---
 
@@ -433,3 +427,5 @@ npx tsx demos/14-deliver/src/04-html-export.ts
 从 Ch9 的理论觉醒，到 Ch10 的控制回路，Ch11 的边界与信任，Ch12 的记忆与注意力，Ch13 的适应，到 Ch14 的交付——你走完了 Harness Engineering 的完整旅程。
 
 你不只学会了构建 Harness，更学会了一种工程思维：理解五个鸿沟，运用成本反转，以控制论的视角诊断问题，用"先减后加"的方法调优。这些能力不限于 Pi，不限于 coding agent——它们适用于任何需要把 AI 能力工程化为可靠产品的场景。
+
+模型会换代，框架会迭代，但鸿沟不会消失——只要人类需要通过工程手段驾驭不确定性，Harness 思维就有用武之地。现在，去构建你自己的 Harness。
